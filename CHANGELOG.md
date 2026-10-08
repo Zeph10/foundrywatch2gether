@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.4.0 — 2026-10-07
+
+### Videos that can't be embedded
+Some owners turn off embedding (YouTube "Playback on other websites has been disabled", Vimeo domain privacy). Nothing can force those to play inside Foundry, so the room now works around them:
+
+- **Detected when added.** Adding a YouTube or Vimeo link asks the provider whether embedding is allowed. If it isn't, the video is queued in pop-up mode automatically. When the title box is empty, the real video title is filled in.
+- **Detected while playing.** If a provider refuses mid-session (YouTube errors 101/150, Vimeo privacy errors), the player shows a panel with: *Watch in a synced pop-up*, *Switch everyone to pop-ups*, *Share my screen instead* and *Skip*. Players see the pop-up option and a note to ask the host.
+- **Synced pop-ups.** The video opens on its own site in a pop-up window that follows the room. Play and seek reload it at the room's current time (with a 2-second allowance for page load). Pause swaps in a "paused" page that shows the time. Each player can turn following off. Controllers can switch any current or queued YouTube/Vimeo/Twitch video between pop-up and embedded playback (*Use pop-ups* / *Play in Foundry*, or the ↗ button in the queue). Pop-up videos get a seekable timeline even though their length is unknown.
+- **Screen share.** A controller can share a browser tab, window or screen (with tab audio) and the room streams it to everyone over peer-to-peer WebRTC. Only the sharer needs access to the video. The video that was playing goes back to the top of the queue at its current position, and comes back when sharing stops. The share ends automatically if the sharer stops it in the browser, reloads, or disconnects. Requires HTTPS (or localhost). A new world setting accepts TURN servers for players behind strict firewalls.
+
+### Fixed
+- Switching a video between pop-up and embedded mode didn't rebuild the player on clients, because the video's id doesn't change.
+
 ## 1.3.1 — 2026-10-07
 
 ### Fixed

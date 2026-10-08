@@ -77,6 +77,15 @@ game.modules.get('foundry-watch-room').api.trigger('Boss Entrance');
 
 Only the GM or permitted live playback controllers can invoke a configured manual trigger. See the music manager for the exact name.
 
+## Videos that can't be embedded
+
+Some video owners disable embedding (YouTube: *"Playback on other websites has been disabled by the video owner"*; Vimeo: domain-restricted privacy). No module can force those to play inside Foundry. The room offers two workarounds and picks up the problem automatically:
+
+- **Synced pop-ups**: everyone watches on the video's own site in a pop-up window that the room keeps in sync. Play and seek reload the pop-up at the room's current time, and pause shows a "paused" page. Best when every player can open the video themselves. Allow pop-ups for your Foundry site when the browser asks. YouTube may need a click inside the pop-up the first time before it plays with sound.
+- **Screen share**: a controller opens the video in another browser tab and clicks the **screen** button in the queue panel (or *Share my screen instead*), then picks that tab and ticks **Share tab audio**. Everyone sees and hears that tab, live. Best when only the host can play the video, e.g. a members-only or region-locked video the host has access to. It needs Foundry served over **HTTPS** (or localhost). Each viewer receives a direct peer-to-peer stream, so the sharer's upload bandwidth limits it to roughly 6–8 viewers. If some players can't connect, add a TURN server in **Module Settings → Screen share: ICE servers**. DRM services (Netflix, Disney+ etc.) show a black screen when shared; that's the services' copy protection.
+
+When you add a YouTube or Vimeo link, the room checks whether embedding is allowed and queues blocked videos in pop-up mode automatically. If a video fails while playing, a panel offers pop-ups, screen share or Skip. Controllers can switch any video either way with **Use pop-ups** / **Play in Foundry** under the player, or the ↗ button on a queued item.
+
 ## Installation (manifest URL)
 
 In Foundry: **Add-on Modules → Install Module**, paste this into **Manifest URL**, and click **Install**:

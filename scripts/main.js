@@ -1,5 +1,7 @@
 import { MODULE_ID, MAX_QUEUE, initialState, expectedPosition, canControl, reduceWithAutoOpen, serverNow, parseSource } from "./state.js";
-import { createAdapter } from "./providers.js";
+import { createAdapter, checkEmbeddable } from "./providers.js";
+import { ScreenShare } from "./streams.js";
+import { ExternalViewer } from "./external.js";
 import { raise } from "./ui.js";
 import { MusicFeatures } from "./music-features.js";
 import { Director } from "./director.js";
@@ -15,6 +17,8 @@ const DRIFT_PERIODIC = 2.5;
 const DRIFT_FORCED = 0.75;
 /** Intents whose rejection is an expected race and shouldn't be reported to the user. */
 const QUIET_REJECTIONS = new Set(["ENDED", "NEXT", "VOTE_TIMEOUT"]);
+/** Identifies the player a room entry needs: switching a video to/from pop-ups keeps its uid but needs a rebuild. */
+const playerKey = entry => entry ? `${entry.uid}${entry.external ? ":external" : ""}` : null;
 const LOOP_LABELS = { off: "Repeat: off", one: "Repeat: current track", queue: "Repeat: whole queue" };
 
 
@@ -43,6 +47,8 @@ class WatchRoom {
     this.sidebarOpen = { window: true, scene: false };
     this.compact = false;
     this.music = new MusicFeatures(this);
+    this.streams = new ScreenShare(this);
+    this.external = new ExternalViewer(this);
     this.director = new Director(this);
   }
 
@@ -78,6 +84,12 @@ class WatchRoom {
         this.reconcile(false).catch(console.error);
       }
     }, 2500);
+    // If the person sharing their screen disconnects, end the share so the room doesn't sit on a dead stream.
+    Hooks.on("userConnected", (user, connected) => {
+      const current = this.state.current;
+      if (!connected && this.isLeader && current?.provider === "stream" && current.sharerId === user.id)
+        this.issue("SHARE_STOP", { uid: current.uid, quiet: true });
+    });
     this.voteTimer = setInterval(() => {
       if (this.isLeader && this.state.pendingVote?.expiresAt <= serverNow()) this.issue('VOTE_TIMEOUT');
     }, 1000);
@@ -120,6 +132,7 @@ class WatchRoom {
   onSocket(payload) {
     if (!payload || typeof payload !== "object") return;
     if (payload.kind === "intent" && this.isLeader) this.processIntent(payload);
+    if (payload.kind === "rtc") this.streams.onSignal(payload);
     if (payload.kind === 'director-journal' && payload.actorId && game.users.get(payload.actorId)?.isGM)
       this.director.showJournal(payload.journalId);
     if (payload.kind === "director-event" && this.isLeader && game.users.get(payload.actorId)?.isGM)
@@ -219,6 +232,8 @@ class WatchRoom {
     if (!initial && s.revision < prior.revision) return;
     this.state = s;
     this.pendingScene = null;
+    this.streams.onState(s);
+    this.external.sync();
     const focus = Boolean(s.cinematicFocus && !this.independent);
     if (s.open && focus && this.hidden) this.show();
     this.root?.classList.toggle('fwr-cinematic',focus);
@@ -241,7 +256,7 @@ class WatchRoom {
     }
     if (!this.hidden) {
       this.updateUI();
-      if ((s.current?.uid || null) !== this.loadedUid) this.loadCurrent();
+      if (playerKey(s.current) !== this.loadedUid) this.loadCurrent();
       else {
         const playbackChanged = !prior.open || prior.playing !== s.playing || prior.position !== s.position ||
           prior.startedAt !== s.startedAt;
@@ -285,8 +300,21 @@ class WatchRoom {
             <div class="fwr-player" data-player></div>
             <div class="fwr-placeholder" data-placeholder><div class="fwr-television">${icon("fa-film")}</div><p>Nothing is playing yet</p><small data-placeholder-hint>Use the queue to add a video.</small></div>
             <button type="button" class="fwr-unlock" data-act="unlock" hidden>${icon("fa-play")} Click to enable playback</button>
+            <div class="fwr-fallback" data-fallback hidden role="alert">
+              <strong>${icon("fa-ban")} This video can't be played inside Foundry</strong>
+              <p data-fallback-reason>Its owner doesn't allow it to be embedded on other sites.</p>
+              <div class="fwr-fallback-actions">
+                <button type="button" data-act="external-open">${icon("fa-up-right-from-square")} Watch in a synced pop-up</button>
+                <button type="button" data-act="external-all" data-fallback-host>${icon("fa-users")} Switch everyone to pop-ups</button>
+                <button type="button" data-act="share-screen" data-fallback-host>${icon("fa-display")} Share my screen instead</button>
+                <button type="button" data-act="fallback-skip" data-fallback-host>${icon("fa-forward-step")} Skip</button>
+              </div>
+              <small data-fallback-hint></small>
+            </div>
           </div>
-          <div class="fwr-now"><span data-provider>WAITING</span> <strong data-title>No video selected</strong></div>
+          <div class="fwr-now"><span data-provider>WAITING</span> <strong data-title>No video selected</strong>
+            <button type="button" class="fwr-now-action" data-act="external-toggle" hidden></button>
+            <button type="button" class="fwr-now-action" data-act="share-stop" hidden>${icon("fa-stop")} Stop sharing</button></div>
           <div class="fwr-controls">
             <div class="fwr-actions">
               <button type="button" data-act="toggle" title="Play or pause" aria-label="Play or pause">${icon("fa-play")}</button>
@@ -322,6 +350,7 @@ class WatchRoom {
               <button type="submit">${icon("fa-plus")} Add video</button>
               <button type="button" data-act="browse" title="Pick a video or audio file from Foundry" aria-label="Browse files">${icon("fa-folder-open")}</button>
               <button type="button" data-act="music-manager" title="Library and encounter themes">${icon("fa-music")}</button>
+              <button type="button" data-act="share-screen" title="Share a screen, window or browser tab with the room (for videos that can't be embedded)" aria-label="Share screen">${icon("fa-display")}</button>
             </div>
           </form>
           <ol class="fwr-list" data-list></ol>
@@ -359,6 +388,10 @@ class WatchRoom {
       if (el) this.issue(el.checked ? "GRANT" : "REVOKE", {userId: el.dataset.permit});
     });
     root.addEventListener("keydown", event => this.onKey(event));
+    root.addEventListener("change", event => {
+      if (!event.target.matches?.("[data-external-follow]")) return;
+      game.settings.set(MODULE_ID, "externalFollow", event.target.checked).then(() => this.external.sync());
+    });
     this.attachDrag(root);
     document.body.append(root);
     this.root = root;
@@ -381,7 +414,7 @@ class WatchRoom {
     this.updateUI();
     this.updateLauncher();
     if (this.layout === "window") this.bringToFront();
-    if (this.state.open && (this.state.current?.uid || null) !== this.loadedUid) this.loadCurrent();
+    if (this.state.open && playerKey(this.state.current) !== this.loadedUid) this.loadCurrent();
     else this.reconcile(true).catch(console.error);
   }
   hide() {
@@ -410,11 +443,26 @@ class WatchRoom {
     if (open) q(el, '[data-act="mode"]').hidden = this.compact;
     if (!open) { this.scenePosition(); return; }
     const canEdit = this.canControl;
-    q(el, "[data-provider]").textContent = s.current ? (s.current.live ? "LIVE" : s.current.audio ? 'AUDIO' : s.current.provider.toUpperCase()) : "WAITING";
+    q(el, "[data-provider]").textContent = !s.current ? "WAITING" : s.current.provider === "stream" ? "SCREEN"
+      : s.current.external ? "POP-UP" : s.current.live ? "LIVE" : s.current.audio ? 'AUDIO' : s.current.provider.toUpperCase();
+    const externalToggle = q(el, '[data-act="external-toggle"]');
+    const canExternal = Boolean(s.current && ["youtube", "vimeo", "twitch", "file"].includes(s.current.provider) && !s.current.audio);
+    externalToggle.hidden = !canEdit || !canExternal;
+    externalToggle.innerHTML = s.current?.external ? `${icon("fa-compress")} Play in Foundry` : `${icon("fa-up-right-from-square")} Use pop-ups`;
+    externalToggle.title = s.current?.external ? "Try embedding this video in the room again"
+      : "Play this video in synced pop-up windows instead (for videos that can't be embedded)";
+    q(el, '[data-act="share-stop"]').hidden = !(s.current?.provider === "stream" && (s.current.sharerId === game.user.id || this.canModerate));
+    const share = q(el, '.fwr-add-row [data-act="share-screen"]');
+    share.hidden = !canEdit;
+    share.classList.toggle("fwr-sharing", this.streams.sharing);
+    share.setAttribute("aria-pressed", String(this.streams.sharing));
+    share.title = this.streams.sharing ? "Stop sharing your screen"
+      : this.streams.supported ? "Share a screen, window or browser tab with the room (for videos that can't be embedded)" : this.streams.unsupportedReason;
     q(el, '.fwr-media').classList.toggle('fwr-audio',Boolean(s.current?.audio));
     q(el, '[data-act="compact"]').title = this.compact ? 'Expand player' : 'Compact thumbnail player';
     q(el, '[data-act="compact"]').innerHTML = this.compact ? icon('fa-up-right-and-down-left-from-center') : icon('fa-down-left-and-up-right-to-center');
     q(el, "[data-title]").textContent = s.current?.title || "No video selected";
+    this.paintFallback();
     q(el, "[data-title]").title = s.current?.title || "";
     q(el, "[data-count]").textContent = `${s.queue.length} queued`;
     const hostUser = game.users.get(s.hostId);
@@ -487,7 +535,7 @@ class WatchRoom {
       item.className = "fwr-list-item";
       const title = document.createElement("div");
       title.className = "fwr-item-title";
-      title.textContent = `${i + 1}. ${entry.title}`;
+      title.textContent = `${i + 1}. ${entry.title}${entry.external ? " ↗" : ""}`;
       title.title = `${entry.title}\n${entry.url}`;
       const actions = document.createElement("div");
       actions.className = "fwr-item-actions";
@@ -496,6 +544,8 @@ class WatchRoom {
           ["move", "Move up", "fa-arrow-up", -1, i === 0],
           ["move", "Move down", "fa-arrow-down", 1, i === queue.length - 1],
           ["select", "Play now", "fa-play"],
+          ...(["youtube", "vimeo", "twitch"].includes(entry.provider) && this.canControl
+            ? [[entry.external ? "queue-embed" : "queue-external", entry.external ? "Play inside Foundry" : "Play in synced pop-ups", entry.external ? "fa-compress" : "fa-up-right-from-square"]] : []),
           ["remove", "Remove", "fa-xmark"]
         ];
         for (const [act, label, fa, delta, disabled] of buttons) {
@@ -573,12 +623,18 @@ class WatchRoom {
     const title = q(this.root, "[data-video-title]").value.trim();
     if (!url) return;
     try {
-      parseSource(url);
+      const parsed = parseSource(url);
       if (this.state.queue.length >= MAX_QUEUE && this.state.current) throw new Error(`The queue is full (${MAX_QUEUE} videos).`);
-      this.issue("ADD", {url, title});
+      const submit = q(this.root, "[data-add-form] button[type=submit]");
+      submit.disabled = true;
+      // Ask YouTube/Vimeo up front whether the owner allows embedding; also fills in the real title.
+      const check = await checkEmbeddable(parsed).finally(() => { submit.disabled = !this.canControl; });
+      const external = check.embeddable === false;
+      this.issue("ADD", {url, title: title || check.title || "", external});
       q(this.root, "[data-url]").value = "";
       q(this.root, "[data-video-title]").value = "";
-      this.setMessage(this.state.current ? "Video added to the queue." : "Video loaded. Press play when everyone is ready.");
+      if (external) this.setMessage("This video doesn't allow embedding, so it will play in synced pop-up windows. You can also share your screen instead.", true);
+      else this.setMessage(this.state.current ? "Video added to the queue." : "Video loaded. Press play when everyone is ready.");
     } catch (error) { this.setMessage(error.message, true); }
   }
 
@@ -641,6 +697,21 @@ class WatchRoom {
       case "remove": this.issue("REMOVE", {uid: button.dataset.uid}); break;
       case "move": this.issue("MOVE", {uid: button.dataset.uid, delta: Number(button.dataset.delta)}); break;
       case "browse": this.browseFiles(); break;
+      case "external-open": this.external.open(); break;
+      case "fallback-skip": this.requestSongChange("NEXT"); break;
+      case "external-all":
+        if (this.state.current) { this.issue("EXTERNAL", {uid: this.state.current.uid, external: true}); this.external.open(); }
+        break;
+      case "external-toggle":
+        if (this.state.current) this.issue("EXTERNAL", {uid: this.state.current.uid, external: !this.state.current.external});
+        break;
+      case "queue-external": this.issue("EXTERNAL", {uid: button.dataset.uid, external: true}); break;
+      case "queue-embed": this.issue("EXTERNAL", {uid: button.dataset.uid, external: false}); break;
+      case "share-screen": await this.toggleShare(); break;
+      case "share-stop":
+        if (this.streams.sharing) this.streams.stop();
+        else if (this.state.current?.provider === "stream") this.issue("SHARE_STOP", {uid: this.state.current.uid});
+        break;
       case "place-scene": this.placeScene(); break;
       case "remove-scene": this.issue("SCENE", {scene: null}); break;
       case "take-host": this.issue("TAKE_HOST"); break;
@@ -674,6 +745,39 @@ class WatchRoom {
         break;
       }
     }
+  }
+
+  async toggleShare() {
+    if (this.streams.sharing) { this.streams.stop(); return; }
+    if (!this.canControl) return;
+    if (!this.streams.supported) { this.setMessage(this.streams.unsupportedReason, true); return; }
+    try {
+      this.setMessage("Choose the browser tab or window that's playing the video. Tick “Share tab audio” so everyone hears it.");
+      await this.streams.start();
+      this.updateUI();
+    } catch (error) {
+      if (error?.name === "NotAllowedError") this.setMessage("Screen sharing was cancelled.");
+      else this.setMessage(`Couldn't share your screen: ${error.message}`, true);
+    }
+  }
+
+  /** The "can't be embedded" panel: shown after a provider reports an embedding block. */
+  paintFallback() {
+    const panel = q(this.root, "[data-fallback]");
+    if (!panel) return;
+    const current = this.state.current;
+    const show = Boolean(current && this.embedBlockedUid === current.uid && !current.external && current.provider !== "stream");
+    panel.hidden = !show;
+    if (!show) return;
+    const canEdit = this.canControl;
+    panel.querySelectorAll("[data-fallback-host]").forEach(b => { b.hidden = !canEdit; });
+    const share = q(panel, '[data-act="share-screen"]');
+    share.disabled = !this.streams.supported;
+    share.title = this.streams.supported ? "Open the video in another tab on your computer, then share that tab" : this.streams.unsupportedReason;
+    q(panel, "[data-fallback-reason]").textContent = this.embedBlockedReason || "Its owner doesn't allow it to be embedded on other sites.";
+    q(panel, "[data-fallback-hint]").textContent = canEdit
+      ? "Pop-ups: everyone watches on the video's own site, kept in sync by the room. Screen share: only you need access to the video."
+      : "You can watch it in a pop-up that follows the room, or ask the host to switch everyone to pop-ups or share their screen.";
   }
 
   requestSongChange(action, uid) {
@@ -740,7 +844,7 @@ class WatchRoom {
   async loadCurrent() {
     const entry = this.state.current;
     const generation = ++this.loadGeneration;
-    this.loadedUid = entry?.uid || null;
+    this.loadedUid = playerKey(entry);
     this.observedPlaying = null;
     this.confirmedPlayingUid = null;
     this.playerErrorUid = null;
@@ -750,10 +854,12 @@ class WatchRoom {
     const mount = q(this.root, "[data-player]");
     if (!mount) { this.loadedUid = null; return; }
     if (!entry) { mount.replaceChildren(); this.setMessage(""); this.paintProgress(); return; }
-    this.setMessage(`Loading ${entry.provider} player…`);
+    if (this.embedBlockedUid !== entry.uid) { this.embedBlockedUid = null; this.embedBlockedReason = ""; }
+    this.paintFallback();
+    this.setMessage(entry.external ? "" : `Loading ${entry.provider === "stream" ? "screen share" : entry.provider + " player"}…`);
     let timeout;
     try {
-      const adapter = await createAdapter(entry, mount, (status, detail) => this.playerEvent(status, entry.uid, detail));
+      const adapter = await createAdapter(entry, mount, (status, detail, info) => this.playerEvent(status, entry.uid, detail, info), { streams: this.streams });
       if (generation !== this.loadGeneration || this.hidden || !this.state.open || !adapter) {
         adapter?.destroy();
         // Forget the load so the next show() rebuilds the player instead of assuming it exists.
@@ -778,7 +884,7 @@ class WatchRoom {
 
   /** If the room is playing but no "playing" event arrives, the browser most likely blocked autoplay. */
   probeAutoplay(uid) {
-    if (!this.state.playing || this.independent || this.confirmedPlayingUid === uid) return;
+    if (!this.state.playing || this.independent || this.confirmedPlayingUid === uid || this.adapter?.kind === "external") return;
     clearTimeout(this.probeTimer);
     this.probeTimer = setTimeout(() => {
       const duration = Number(this.adapter?.getDuration?.()) || 0;
@@ -790,8 +896,17 @@ class WatchRoom {
     }, 4000);
   }
 
-  playerEvent(status, uid, detail) {
+  playerEvent(status, uid, detail, info = {}) {
     if (uid !== this.state.current?.uid || this.hidden) return;
+    if (status === "error" && info?.blocked) {
+      this.embedBlockedUid = uid;
+      this.embedBlockedReason = detail || "";
+      this.playerErrorUid = uid;
+      this.showUnlock(false);
+      this.setMessage("");
+      this.paintFallback();
+      return;
+    }
     if (status === "playing") {
       this.observedPlaying = true; this.localPlaying = true; this.confirmedPlayingUid = uid;
       this.showUnlock(false);
@@ -820,6 +935,7 @@ class WatchRoom {
 
   async reconcile(force = false) {
     if (this.hidden || !this.state.open || this.independent || !this.adapter || !this.state.current) return;
+    if (this.adapter.kind === "external") { this.external.sync(); this.external.paint(); return; }
     if (this.syncBusy) {
       // Don't drop a state-change sync that arrives mid-check; run it right after.
       this.resyncQueued = Boolean(this.resyncQueued) || force;
@@ -871,7 +987,12 @@ class WatchRoom {
     let t = this.independent ? (Number(this.adapter?.getTime?.()) || 0) : expectedPosition(this.state);
     if (duration > 0) t = Math.min(t, duration);
     const scrub = q(this.root, "[data-seek]");
-    if (scrub && !this.scrubbing) {
+    if (scrub && !this.scrubbing && entry?.external && !entry.live) {
+      // Pop-up videos: the room can't know their length, so offer a rough timeline that grows as it plays.
+      scrub.max = String(Math.max(1800, Math.ceil((t + 300) / 600) * 600));
+      if (!scrub.matches(":active")) scrub.value = String(t);
+      scrub.disabled = !this.canControl;
+    } else if (scrub && !this.scrubbing) {
       // Without a known duration the bar would just pin to the end, so show it empty and inert.
       scrub.max = String(Math.max(duration, 1));
       if (!scrub.matches(":active")) scrub.value = duration > 0 ? String(Math.min(t, duration)) : "0";
@@ -1088,7 +1209,7 @@ class WatchRoom {
         return;
       } catch (error) { this.setMessage(`Picture-in-Picture unavailable: ${error.message}`, true); return; }
     }
-    if (this.adapter?.kind === "file" && document.pictureInPictureEnabled) {
+    if (["file", "stream"].includes(this.adapter?.kind) && document.pictureInPictureEnabled) {
       try { await this.adapter.pip(); return; }
       catch { /* fall through */ }
     }
@@ -1112,6 +1233,14 @@ Hooks.once("init", () => {
     name: "Encounter music and cinematics open the room",
     hint: "When the room is closed, a triggered encounter track, boss phase or cinematic starts it automatically (with the active GM as host). Turn off to have automation do nothing while the room is closed.",
     scope: "world", config: true, type: Boolean, default: true
+  });
+  game.settings.register(MODULE_ID, "iceServers", {
+    name: "Screen share: ICE servers (advanced)",
+    hint: 'JSON list of STUN/TURN servers for screen sharing, e.g. [{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]. Leave empty to use public STUN, which works on most home networks. Add a TURN server if players behind strict firewalls can\'t connect.',
+    scope: "world", config: true, type: String, default: ""
+  });
+  game.settings.register(MODULE_ID, "externalFollow", {
+    name: "Pop-up follows the room", scope: "client", config: false, type: Boolean, default: true
   });
   game.settings.register(MODULE_ID, "autoJoin", {
     name: "Automatically join when a room opens",

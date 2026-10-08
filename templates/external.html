@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Watch Room · paused</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; margin: 0; }
+  body { display: grid; place-items: center; background: radial-gradient(ellipse at 50% 70%, #3a2f1f, #121211 70%); color: #f1ebde;
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; text-align: center; padding: 16px; box-sizing: border-box; }
+  main { max-width: 520px; }
+  .mark { font-size: 46px; color: #d7b56e; }
+  h1 { font-size: 20px; margin: 8px 0 4px; overflow-wrap: anywhere; }
+  .time { font-variant-numeric: tabular-nums; color: #d7b56e; font-size: 28px; margin: 6px 0; }
+  p { color: #b0a996; margin: 6px 0; }
+</style>
+</head>
+<body>
+<main>
+  <div class="mark" aria-hidden="true">❚❚</div>
+  <h1 id="title">Watch Room</h1>
+  <div class="time" id="time"></div>
+  <p id="message">The room is paused. This window resumes when the room plays.</p>
+  <p><small>Keep this window open. Closing it means you'll need to reopen it from the Watch Room.</small></p>
+</main>
+<script>
+  // Values come from the query string; textContent only, never HTML.
+  const params = new URLSearchParams(location.search);
+  const title = params.get("title") || "Watch Room";
+  const at = Math.max(0, Math.floor(Number(params.get("at")) || 0));
+  const pad = n => String(n).padStart(2, "0");
+  const clock = (at >= 3600 ? Math.floor(at / 3600) + ":" : "") + pad(Math.floor((at % 3600) / 60)) + ":" + pad(at % 60);
+  document.getElementById("title").textContent = title.slice(0, 160);
+  document.getElementById("time").textContent = at ? "Paused at " + clock : "";
+  document.getElementById("message").textContent = (params.get("message") || document.getElementById("message").textContent).slice(0, 200);
+  document.title = "Paused · " + title.slice(0, 80);
+</script>
+</body>
+</html>

@@ -114,6 +114,26 @@ export function makeEntry(data, title, loop = false) {
   return { ...parsed, title: cleanTitle(title, parsed.label), loop: Boolean(loop), uid: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}` };
 }
 
+/** Providers that can be watched on their own site in a synced pop-up instead of being embedded. */
+export const EXTERNAL_PROVIDERS = new Set(["youtube", "vimeo", "twitch", "file"]);
+const newUid = now => globalThis.crypto?.randomUUID?.() || `${now}-${Math.random().toString(36).slice(2)}`;
+
+/** The provider's own page for an entry, starting at `seconds` where the site supports it. */
+export function externalUrl(entry, seconds = 0) {
+  const t = Math.max(0, Math.floor(Number(seconds) || 0));
+  switch (entry?.provider) {
+    case "youtube": return `https://www.youtube.com/watch?v=${entry.id}${t ? `&t=${t}s` : ""}`;
+    case "vimeo": return `https://vimeo.com/${entry.id}${entry.hash ? `/${entry.hash}` : ""}${t ? `#t=${t}s` : ""}`;
+    case "twitch": {
+      if (entry.videoType !== "vod") return `https://www.twitch.tv/${entry.id}`;
+      const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), sec = t % 60;
+      return `https://www.twitch.tv/videos/${entry.id}${t ? `?t=${h}h${m}m${sec}s` : ""}`;
+    }
+    case "file": return `${String(entry.url).split("#")[0]}${t ? `#t=${t}` : ""}`;
+    default: return "";
+  }
+}
+
 const validPos = v => Number.isFinite(Number(v)) ? Math.max(0, Math.min(86400 * 12, Number(v))) : 0;
 const copy = obj => JSON.parse(JSON.stringify(obj));
 
@@ -211,6 +231,7 @@ export function reduceIntent(previous, intent, actor, users, minimumRole, now) {
         if (!host) return null;
         let entry;
         try { entry = makeEntry({url: intent.url}, intent.title, intent.loop); } catch { return null; }
+        if (intent.external && EXTERNAL_PROVIDERS.has(entry.provider)) entry.external = true;
         if (!s.current) setCurrent(s, entry, now, false);
         else if (s.queue.length < MAX_QUEUE) s.queue.push(entry);
         else return null;
@@ -249,6 +270,36 @@ export function reduceIntent(previous, intent, actor, users, minimumRole, now) {
           return null;
         }
         advance(s, now, true);
+        break;
+      }
+      case "EXTERNAL": {
+        // Switch a video between embedded playback and synced pop-up windows (for videos whose
+        // owners disallow embedding).
+        if (!host) return null;
+        const entry = [s.current, ...s.queue].find(e => e?.uid === intent.uid);
+        if (!entry || !EXTERNAL_PROVIDERS.has(entry.provider)) return null;
+        if (Boolean(entry.external) === Boolean(intent.external)) return null;
+        entry.external = Boolean(intent.external);
+        break;
+      }
+      case "SHARE_START": {
+        // A controller streams their own screen/tab to the room. The video that was playing goes
+        // back to the front of the queue, keeping its position.
+        if (!host) return null;
+        if (s.current?.provider === "stream" && s.current.sharerId !== actor.id) return null;
+        const entry = { provider: "stream", sharerId: actor.id, live: true, start: 0, url: "", label: "Screen share",
+          title: cleanTitle(intent.title, `${cleanTitle(actor.name, "Host")}'s screen`), uid: newUid(now) };
+        if (s.current && s.current.provider !== "stream" && s.queue.length < MAX_QUEUE) {
+          s.queue.unshift({ ...s.current, start: s.current.live ? 0 : expectedPosition(s, now), uid: newUid(now) });
+        }
+        s.resumeStack = [];
+        setCurrent(s, entry, now, true);
+        break;
+      }
+      case "SHARE_STOP": {
+        if (s.current?.provider !== "stream" || (intent.uid && intent.uid !== s.current.uid)) return null;
+        if (!(moderator || host || actor?.id === s.current.sharerId)) return null;
+        advance(s, now);
         break;
       }
       case "PLAY":

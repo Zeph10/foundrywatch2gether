@@ -35,20 +35,106 @@ const YOUTUBE_ERRORS = {
   150: "The owner doesn't allow this YouTube video to be embedded."
 };
 
-function notify(emit, state, detail) { try { emit(state, detail); } catch (error) { console.warn("Watch Room status event", error); } }
+/** YouTube error codes meaning "the owner doesn't allow embedding". */
+const YOUTUBE_EMBED_BLOCKED = new Set([101, 150]);
+
+function notify(emit, state, detail, info) { try { emit(state, detail, info); } catch (error) { console.warn("Watch Room status event", error); } }
+
+/**
+ * Ask the provider's oEmbed endpoint whether a video may be embedded, before anyone tries.
+ * Resolves {embeddable: true|false|null, title?}; null means "couldn't tell" (network, CORS, other sites).
+ */
+export async function checkEmbeddable(entry, { fetchImpl = globalThis.fetch, timeoutMs = 4000, hostname = globalThis.location?.hostname } = {}) {
+  let url;
+  if (entry?.provider === "youtube") url = `https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(entry.url)}`;
+  else if (entry?.provider === "vimeo") url = `https://vimeo.com/api/oembed.json?url=${encodeURIComponent(entry.url)}${hostname ? `&domain=${encodeURIComponent(hostname)}` : ""}`;
+  else return { embeddable: null };
+  if (typeof fetchImpl !== "function") return { embeddable: null };
+  const controller = globalThis.AbortController ? new AbortController() : null;
+  const timer = setTimeout(() => controller?.abort(), timeoutMs);
+  try {
+    const response = await fetchImpl(url, { signal: controller?.signal, credentials: "omit" });
+    if (response.ok) {
+      const data = await response.json().catch(() => ({}));
+      return { embeddable: true, title: typeof data?.title === "string" ? data.title : "" };
+    }
+    // YouTube answers 401 and Vimeo 403 when the owner has disabled embedding (or restricted domains).
+    if (response.status === 401 || response.status === 403) return { embeddable: false };
+    return { embeddable: null, status: response.status };
+  } catch {
+    return { embeddable: null };
+  } finally { clearTimeout(timer); }
+}
 const finite = v => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
 /**
  * Build a player for `entry` inside `mount`. Resolves to an adapter, or null when the
  * mount was replaced by a newer load while the provider SDK was still downloading.
  */
-export async function createAdapter(entry, mount, onStatus) {
+export async function createAdapter(entry, mount, onStatus, context = {}) {
   mount.replaceChildren();
   const holder = document.createElement("div");
   holder.className = "fwr-media-inner";
   mount.append(holder);
   let destroyed = false;
-  const callback = (type, detail) => { if (!destroyed) notify(onStatus, type, detail); };
+  const callback = (type, detail, info) => { if (!destroyed) notify(onStatus, type, detail, info); };
+
+  if (entry.external) {
+    // Not embedded: the room drives a pop-up window on the provider's own site (see ExternalViewer).
+    const panel = document.createElement("div");
+    panel.className = "fwr-external";
+    const site = { youtube: "YouTube", vimeo: "Vimeo", twitch: "Twitch", file: "a new window" }[entry.provider] || "its site";
+    panel.innerHTML = `
+      <i class="fa-solid fa-up-right-from-square fwr-external-icon" aria-hidden="true"></i>
+      <strong></strong>
+      <p>This video plays on ${site} in a pop-up window that follows the room's play, pause and seek.</p>
+      <button type="button" data-act="external-open"><i class="fa-solid fa-window-restore" aria-hidden="true"></i> <span data-external-label>Open synced pop-up</span></button>
+      <label class="fwr-external-follow"><input type="checkbox" data-external-follow> Follow the room (the pop-up reloads at the right time when the room plays, pauses or seeks)</label>
+      <small data-external-status></small>`;
+    panel.querySelector("strong").textContent = entry.title || entry.label || "External video";
+    holder.append(panel);
+    return {
+      kind: "external", live: Boolean(entry.live), ready: Promise.resolve(), panel,
+      play() {}, pause() {}, seek() {},
+      getTime: () => 0, getDuration: () => 0, setVolume() {},
+      destroy() { destroyed = true; holder.remove(); }
+    };
+  }
+
+  if (entry.provider === "stream") {
+    // Another user's screen/tab, received over WebRTC (see ScreenShare).
+    const streams = context.streams;
+    const video = document.createElement("video");
+    video.className = "fwr-video";
+    video.playsInline = true;
+    video.autoplay = true;
+    const status = document.createElement("div");
+    status.className = "fwr-stream-status";
+    holder.append(video, status);
+    const sharing = streams?.isSharer(entry);
+    video.muted = Boolean(sharing); // the sharer hears the original; avoid echo
+    video.addEventListener("playing", () => callback("playing"));
+    video.addEventListener("pause", () => callback("paused"));
+    const setStatus = text => { status.textContent = text || ""; status.hidden = !text; };
+    let readyResolve;
+    const ready = new Promise(resolve => { readyResolve = resolve; });
+    const unwatch = streams?.watch(entry, {
+      stream: media => { video.srcObject = media; setStatus(""); readyResolve(); callback("ready"); },
+      status: text => setStatus(text),
+      failed: text => { setStatus(text); readyResolve(); callback("error", text); }
+    }) || (() => {});
+    if (!streams) { setStatus("Screen sharing isn't available."); readyResolve(); }
+    let volume = 1;
+    return {
+      kind: "stream", live: true, ready, element: video,
+      play: () => video.srcObject ? video.play() : Promise.resolve(),
+      pause: () => { video.pause(); },
+      seek() {}, getTime: () => 0, getDuration: () => 0,
+      setVolume: v => { volume = v; if (!sharing) { video.volume = v; video.muted = v === 0; } },
+      async pip() { if (document.pictureInPictureEnabled && video.requestPictureInPicture) await video.requestPictureInPicture(); },
+      destroy() { destroyed = true; unwatch(); video.srcObject = null; holder.remove(); }
+    };
+  }
   const stale = () => !holder.isConnected || holder.parentNode !== mount;
 
   if (entry.provider === "file") {
@@ -103,7 +189,7 @@ export async function createAdapter(entry, mount, onStatus) {
           if (event.data === window.YT.PlayerState.PLAYING) callback("playing");
           if (event.data === window.YT.PlayerState.PAUSED) callback("paused");
         },
-        onError: event => callback("error", YOUTUBE_ERRORS[event?.data] || "")
+        onError: event => callback("error", YOUTUBE_ERRORS[event?.data] || "", { blocked: YOUTUBE_EMBED_BLOCKED.has(Number(event?.data)) })
       }
     });
     return {
@@ -129,10 +215,15 @@ export async function createAdapter(entry, mount, onStatus) {
     player.on("ended", () => callback("ended"));
     player.on("play", () => callback("playing"));
     player.on("pause", () => callback("paused"));
-    player.on("error", event => callback("error", event?.message || ""));
+    const vimeoBlocked = error => /privacy|password|domain|embed/i.test(`${error?.name || ""} ${error?.message || ""}`);
+    player.on("error", event => callback("error", vimeoBlocked(event)
+      ? "This Vimeo video's privacy settings don't allow it to play here." : event?.message || "", { blocked: vimeoBlocked(event) }));
     const ready = player.ready().then(async () => {
       duration = await player.getDuration().catch(() => 0) || duration;
       callback("ready");
+    }, error => {
+      if (vimeoBlocked(error)) callback("error", "This Vimeo video's privacy settings don't allow it to play here.", { blocked: true });
+      throw error;
     });
     return {
       kind: "vimeo", live: false, ready,
