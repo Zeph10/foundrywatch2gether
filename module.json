@@ -19,10 +19,10 @@
     "styles/watch-room.css"
   ],
   "socket": true,
-  "url": "https://github.com/OWNER/REPO",
-  "manifest": "https://github.com/OWNER/REPO/releases/latest/download/module.json",
-  "download": "https://github.com/OWNER/REPO/releases/download/v1.3.1/module.zip",
-  "bugs": "https://github.com/OWNER/REPO/issues",
-  "readme": "https://github.com/OWNER/REPO/blob/main/README.md",
-  "changelog": "https://github.com/OWNER/REPO/blob/main/CHANGELOG.md"
+  "url": "https://github.com/Zeph10/foundrywatch2gether",
+  "manifest": "https://github.com/Zeph10/foundrywatch2gether/releases/latest/download/module.json",
+  "download": "https://github.com/Zeph10/foundrywatch2gether/releases/download/v1.3.1/module.zip",
+  "bugs": "https://github.com/Zeph10/foundrywatch2gether/issues",
+  "readme": "https://github.com/Zeph10/foundrywatch2gether/blob/main/README.md",
+  "changelog": "https://github.com/Zeph10/foundrywatch2gether/blob/main/CHANGELOG.md"
 }

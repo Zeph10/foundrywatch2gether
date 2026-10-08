@@ -82,7 +82,7 @@ Only the GM or permitted live playback controllers can invoke a configured manua
 In Foundry: **Add-on Modules → Install Module**, paste this into **Manifest URL**, and click **Install**:
 
 ```
-https://github.com/OWNER/REPO/releases/latest/download/module.json
+https://github.com/Zeph10/foundrywatch2gether/releases/latest/download/module.json
 ```
 
 Foundry will then offer updates whenever a new release is published.
@@ -90,7 +90,7 @@ Foundry will then offer updates whenever a new release is published.
 ### Publishing releases (maintainers)
 
 1. Push this folder's contents to the root of a public GitHub repository (so `module.json` is at the top level).
-2. On GitHub, open **Releases → Draft a new release**, create a tag such as `v1.3.1`, and click **Publish release**.
+2. Push a version tag (`git tag v1.3.2 && git push --tags`), or on GitHub open **Releases → Draft a new release** with such a tag and click **Publish release**.
 3. The included workflow (`.github/workflows/release.yml`) runs the tests, writes the version and this repository's URLs into `module.json`, and attaches `module.json` and `module.zip` to the release. After about a minute the manifest URL above works.
 4. For later versions, update `CHANGELOG.md`, push, and publish a new release with a higher tag. Foundry picks up the update.
 

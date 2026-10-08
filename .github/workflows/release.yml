@@ -1,12 +1,14 @@
-# Builds a Foundry-installable release whenever you publish a GitHub release.
-# Tag releases like v1.3.1. The workflow stamps the version and this repository's
-# URLs into module.json, zips the module, and attaches both files to the release.
+# Builds a Foundry-installable release when you push a version tag (git tag v1.3.2 && git push --tags)
+# or publish a GitHub release with such a tag. The workflow stamps the version and this repository's
+# URLs into module.json, zips the module, and creates the release (or attaches to it) with both files.
 #
 # Manifest URL to paste into Foundry (always points at the newest release):
 #   https://github.com/<you>/<repo>/releases/latest/download/module.json
 name: Release module
 
 on:
+  push:
+    tags: ["v*"]
   release:
     types: [published]
 
@@ -28,7 +30,7 @@ jobs:
 
       - name: Stamp version and URLs into module.json
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.event.release.tag_name || github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
           VERSION="${TAG#v}"
@@ -47,7 +49,15 @@ jobs:
       - name: Build module.zip
         run: zip -r module.zip module.json README.md CHANGELOG.md scripts styles
 
-      - name: Attach to release
+      - name: Create or update the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" module.json module.zip --clobber
+          TAG: ${{ github.event.release.tag_name || github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" module.json module.zip --clobber
+          else
+            gh release create "$TAG" module.json module.zip --title "$TAG" \
+              --notes "Install in Foundry with this manifest URL: https://github.com/${REPO}/releases/latest/download/module.json — see CHANGELOG.md for changes."
+          fi
