@@ -1,0 +1,53 @@
+# Builds a Foundry-installable release whenever you publish a GitHub release.
+# Tag releases like v1.3.1. The workflow stamps the version and this repository's
+# URLs into module.json, zips the module, and attaches both files to the release.
+#
+# Manifest URL to paste into Foundry (always points at the newest release):
+#   https://github.com/<you>/<repo>/releases/latest/download/module.json
+name: Release module
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run tests
+        run: node --test tests/*.mjs
+
+      - name: Stamp version and URLs into module.json
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          VERSION="${TAG#v}"
+          BASE="https://github.com/${REPO}"
+          jq --arg v "$VERSION" --arg base "$BASE" --arg tag "$TAG" '
+            .version = $v
+            | .url = $base
+            | .manifest = ($base + "/releases/latest/download/module.json")
+            | .download = ($base + "/releases/download/" + $tag + "/module.zip")
+            | .bugs = ($base + "/issues")
+            | .readme = ($base + "/blob/main/README.md")
+            | .changelog = ($base + "/blob/main/CHANGELOG.md")
+          ' module.json > module.tmp && mv module.tmp module.json
+          cat module.json
+
+      - name: Build module.zip
+        run: zip -r module.zip module.json README.md CHANGELOG.md scripts styles
+
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" module.json module.zip --clobber
