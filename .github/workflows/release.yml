@@ -1,6 +1,9 @@
-# Builds a Foundry-installable release when you push a version tag (git tag v1.3.2 && git push --tags)
-# or publish a GitHub release with such a tag. The workflow stamps the version and this repository's
-# URLs into module.json, zips the module, and creates the release (or attaches to it) with both files.
+# Publishes a Foundry-installable release automatically.
+#
+# To release: bump "version" in module.json (e.g. 1.3.2), update CHANGELOG.md, and push to main.
+# If no release exists for that version yet, this workflow runs the tests, stamps this repository's
+# URLs into module.json, zips the module, and creates release vX.Y.Z with module.json + module.zip.
+# You can also run it by hand from the Actions tab ("Run workflow").
 #
 # Manifest URL to paste into Foundry (always points at the newest release):
 #   https://github.com/<you>/<repo>/releases/latest/download/module.json
@@ -8,9 +11,9 @@ name: Release module
 
 on:
   push:
-    tags: ["v*"]
-  release:
-    types: [published]
+    branches: [main]
+    paths: [module.json]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -25,19 +28,34 @@ jobs:
         with:
           node-version: 22
 
+      - name: Read version
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(jq -r .version module.json)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release v$VERSION already exists; nothing to publish. Bump the version in module.json to release."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run tests
+        if: steps.meta.outputs.exists == 'false'
         run: node --test tests/*.mjs
 
-      - name: Stamp version and URLs into module.json
+      - name: Stamp this repository's URLs into module.json
+        if: steps.meta.outputs.exists == 'false'
         env:
-          TAG: ${{ github.event.release.tag_name || github.ref_name }}
+          TAG: ${{ steps.meta.outputs.tag }}
           REPO: ${{ github.repository }}
         run: |
-          VERSION="${TAG#v}"
           BASE="https://github.com/${REPO}"
-          jq --arg v "$VERSION" --arg base "$BASE" --arg tag "$TAG" '
-            .version = $v
-            | .url = $base
+          jq --arg base "$BASE" --arg tag "$TAG" '
+            .url = $base
             | .manifest = ($base + "/releases/latest/download/module.json")
             | .download = ($base + "/releases/download/" + $tag + "/module.zip")
             | .bugs = ($base + "/issues")
@@ -47,17 +65,15 @@ jobs:
           cat module.json
 
       - name: Build module.zip
+        if: steps.meta.outputs.exists == 'false'
         run: zip -r module.zip module.json README.md CHANGELOG.md scripts styles
 
-      - name: Create or update the release
+      - name: Create release
+        if: steps.meta.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name || github.ref_name }}
+          TAG: ${{ steps.meta.outputs.tag }}
           REPO: ${{ github.repository }}
         run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" module.json module.zip --clobber
-          else
-            gh release create "$TAG" module.json module.zip --title "$TAG" \
-              --notes "Install in Foundry with this manifest URL: https://github.com/${REPO}/releases/latest/download/module.json — see CHANGELOG.md for changes."
-          fi
+          gh release create "$TAG" module.json module.zip --target "$GITHUB_SHA" --title "$TAG" \
+            --notes "Install in Foundry with this manifest URL: https://github.com/${REPO}/releases/latest/download/module.json — see CHANGELOG.md for what changed."
