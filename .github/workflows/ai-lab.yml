@@ -37,13 +37,20 @@ jobs:
         if: inputs.mode == 'tools'
         run: |
           mkdir -p lab && cd lab
-          npm pack onnxruntime-web@1.20.1 --silent
-          tar -xzf onnxruntime-web-1.20.1.tgz
-          ls package/dist | tee ort-files.txt
-          tar -czf ort-web-1.20.1-dist.tgz -C package dist LICENSE
+          {
+            npm pack onnxruntime-web@1.20.1 2>&1
+            ls -la
+            TGZ=$(ls onnxruntime-web-*.tgz | head -1)
+            tar -xzf "$TGZ"
+            ls package | tee pkg-files.txt
+            ls -la package/dist | tee ort-files.txt
+            LIC=$(ls package | grep -i -E '^licen[cs]e' | head -1)
+            tar -czf ort-web-1.20.1-dist.tgz -C package dist $LIC
+            ls -la ort-web-1.20.1-dist.tgz
+          } 2>&1 | tee -a lab.log
 
       - name: Model parameters and download sources (CORS)
-        if: inputs.mode == 'tools'
+        if: always() && inputs.mode == 'tools'
         run: |
           cd lab
           curl -fsSL https://raw.githubusercontent.com/TRvlvr/application_data/main/mdx_model_data/model_data.json -o model_data.json || echo '{}' > model_data.json
@@ -88,10 +95,11 @@ jobs:
           cat cors.json | head -150
 
       - name: Publish lab pre-release
-        if: inputs.mode == 'tools'
+        if: always() && inputs.mode == 'tools'
         run: |
           gh release delete lab-tools --yes --cleanup-tag || true
-          cd lab
+          mkdir -p lab && cd lab
+          touch lab.log
+          FILES=$(ls ort-web-1.20.1-dist.tgz ort-files.txt pkg-files.txt model-params.json cors.json lab.log 2>/dev/null)
           gh release create lab-tools --prerelease --title "Lab tools (development only, will be deleted)" \
-            --notes "Temporary files for developing AI vocal separation. Not part of the module." \
-            ort-web-1.20.1-dist.tgz ort-files.txt model-params.json cors.json
+            --notes "Temporary files for developing AI vocal separation. Not part of the module." $FILES
