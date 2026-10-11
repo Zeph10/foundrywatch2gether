@@ -1,0 +1,97 @@
+# Development-only lab for the AI vocal separation feature. Not part of the module.
+# Run by hand ("Run workflow"). mode=tools gathers the ONNX runtime, model parameters, CORS checks and
+# into a temporary pre-release named "lab-tools"; mode=cleanup deletes it.
+name: AI lab (development)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "tools or cleanup"
+        required: true
+        default: "tools"
+
+permissions:
+  contents: write
+
+jobs:
+  lab:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clean up
+        if: inputs.mode == 'cleanup'
+        run: gh release delete lab-tools --yes --cleanup-tag || true
+
+      - uses: actions/setup-node@v4
+        if: inputs.mode == 'tools'
+        with: { node-version: 22 }
+      - uses: actions/setup-python@v5
+        if: inputs.mode == 'tools'
+        with: { python-version: "3.11" }
+
+      - name: ONNX Runtime web build
+        if: inputs.mode == 'tools'
+        run: |
+          mkdir -p lab && cd lab
+          npm pack onnxruntime-web@1.20.1 --silent
+          tar -xzf onnxruntime-web-1.20.1.tgz
+          ls package/dist | tee ort-files.txt
+          tar -czf ort-web-1.20.1-dist.tgz -C package dist LICENSE
+
+      - name: Model parameters and download sources (CORS)
+        if: inputs.mode == 'tools'
+        run: |
+          cd lab
+          curl -fsSL https://raw.githubusercontent.com/TRvlvr/application_data/main/mdx_model_data/model_data.json -o model_data.json || echo '{}' > model_data.json
+          curl -fsSL https://raw.githubusercontent.com/TRvlvr/application_data/main/mdx_model_data/model_name_mapper.json -o model_name_mapper.json || echo '{}' > model_name_mapper.json
+          curl -fsSL -o inst.onnx https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-MDX-NET-Inst_HQ_3.onnx
+          python - <<'PY'
+          import hashlib, json
+          data = open('inst.onnx', 'rb').read()
+          # UVR identifies models by the MD5 of the last 10 000 × 1024 bytes (or the whole file if smaller).
+          tail = data[-10000 * 1024:] if len(data) > 10000 * 1024 else data
+          h = hashlib.md5(tail).hexdigest()
+          md = json.load(open('model_data.json'))
+          names = json.load(open('model_name_mapper.json'))
+          out = {"hash": h, "params": md.get(h), "size": len(data), "md5_full": hashlib.md5(data).hexdigest(),
+                 "inst_like": {k: v for k, v in md.items() if isinstance(v, dict) and v.get('mdx_dim_f_set') == 3072 and v.get('mdx_n_fft_scale_set') == 6144},
+                 "names_with_inst": {k: v for k, v in names.items() if 'Inst' in str(v)}}
+          json.dump(out, open('model-params.json', 'w'), indent=1)
+          print(json.dumps(out, indent=1)[:3000])
+          PY
+          # Which download sources let a browser fetch the model from another site?
+          python - <<'PY' > cors.json
+          import json, subprocess, urllib.request
+          def head(url):
+              r = subprocess.run(['curl', '-sSIL', '-H', 'Origin: https://vtt.example.com', '--max-time', '30', url], capture_output=True, text=True)
+              hdr = r.stdout.lower()
+              return {"url": url, "acao_lines": [l for l in hdr.splitlines() if l.startswith('access-control-allow-origin')],
+                      "status_lines": [l for l in hdr.splitlines() if l.startswith('http/')], "length": [l for l in hdr.splitlines() if l.startswith('content-length')][-1:]}
+          results = [head('https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-MDX-NET-Inst_HQ_3.onnx')]
+          try:
+              found = json.load(urllib.request.urlopen('https://huggingface.co/api/models?search=UVR&limit=100&full=true'))
+          except Exception as e:
+              found = []; results.append({"hf_search_error": str(e)})
+          for m in found:
+              for s in m.get('siblings', []):
+                  name = s.get('rfilename', '')
+                  if name.endswith('UVR-MDX-NET-Inst_HQ_3.onnx') or name.endswith('Kim_Vocal_2.onnx') or name.endswith('UVR-MDX-NET-Voc_FT.onnx'):
+                      results.append(head(f"https://huggingface.co/{m['id']}/resolve/main/{name}"))
+          for f in ['ort.webgpu.min.mjs', 'ort-wasm-simd-threaded.jsep.wasm', 'ort-wasm-simd-threaded.wasm']:
+              results.append(head(f'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/{f}'))
+          print(json.dumps(results, indent=1))
+          PY
+          cat cors.json | head -150
+
+      - name: Publish lab pre-release
+        if: inputs.mode == 'tools'
+        run: |
+          gh release delete lab-tools --yes --cleanup-tag || true
+          cd lab
+          gh release create lab-tools --prerelease --title "Lab tools (development only, will be deleted)" \
+            --notes "Temporary files for developing AI vocal separation. Not part of the module." \
+            ort-web-1.20.1-dist.tgz ort-files.txt model-params.json cors.json
