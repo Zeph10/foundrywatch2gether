@@ -119,10 +119,16 @@ export class Converter {
       const audio = await this.decode(data);
       const title = String(options.title || "").trim() || sourceTrack?.title || titleFromName(source.file?.name || name) || "Imported track";
 
-      const result = await this.inWorker(audio, outputs, options, onProgress, job);
+      let ai = null;
+      if (options.engine === "ai" && (outputs.instrumental || outputs.vocals)) {
+        onProgress("Loading AI model", 0);
+        const models = this.music.ai;
+        ai = { modelBuffer: await models.load(), ortBase: models.ortBase, params: models.model.params, denoise: options.denoise !== false };
+      }
+      const result = await this.inWorker(audio, outputs, { ...options, ai }, onProgress, job);
       if (controller.signal.aborted) throw new DOMException("Cancelled", "AbortError");
       const notes = [];
-      if (result.mono) notes.push("The recording is mono, so it can't be split into vocals and instrumental. Only the full track was saved.");
+      if (result.mono && result.engine !== "ai") notes.push("The recording is mono, so it can't be split into vocals and instrumental. Only the full track was saved.");
       if (result.encoder === "wav") notes.push("The MP3 encoder couldn't be loaded, so files were saved as WAV (larger, same quality).");
 
       const stamp = Date.now().toString(36).slice(-5);
@@ -138,9 +144,10 @@ export class Converter {
         if (!path) throw new Error("Foundry didn't return a path for the uploaded file.");
         saved.push({ kind: file.kind, path, title: `${title}${suffix[file.kind]}` });
       }
-      const added = await this.addToLibrary(saved, { sourceTrack, category: options.category });
+      const engine = result.engine === "ai" ? "ai" : "spectral";
+      const added = await this.addToLibrary(saved, { sourceTrack, category: options.category, engine });
       onProgress("Done", 1);
-      return { title, saved, added, notes, encoder: result.encoder };
+      return { title, saved, added, notes, encoder: result.encoder, engine, backend: result.backend, workers: result.aiWorkers };
     } finally {
       job.worker?.terminate();
       if (this.job === job) this.job = null;
@@ -160,13 +167,15 @@ export class Converter {
       worker.onerror = event => reject(new Error(event.message || "The conversion worker failed to start."));
       job.controller.signal.addEventListener("abort", () => { worker.terminate(); reject(new DOMException("Cancelled", "AbortError")); });
       const kbps = [128, 160, 192, 256, 320].includes(Number(options.kbps)) ? Number(options.kbps) : 192;
+      const transfer = [audio.left.buffer, audio.right.buffer];
+      if (options.ai?.modelBuffer) transfer.push(options.ai.modelBuffer);
       worker.postMessage({ left: audio.left, right: audio.right, sampleRate: audio.sampleRate, outputs,
-        strength: Number(options.strength) || 0.7, kbps, format: "mp3" }, [audio.left.buffer, audio.right.buffer]);
+        strength: Number(options.strength) || 0.7, kbps, format: "mp3", engine: options.ai ? "ai" : "spectral", ai: options.ai }, transfer);
     });
   }
 
   /** Library entries for the saved files, linked to each other (and to the source track) through `stems`. */
-  async addToLibrary(saved, { sourceTrack, category }) {
+  async addToLibrary(saved, { sourceTrack, category, engine = "spectral" }) {
     if (!saved.length) return [];
     const id = () => globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const entries = saved.map(s => ({
@@ -178,8 +187,11 @@ export class Converter {
     const stems = Object.fromEntries(entries.filter(e => e.kind !== "original").map(e => [e.kind, e.id]));
     const parentId = entries.find(e => e.kind === "original")?.id || sourceTrack?.id;
     for (const e of entries) { if (e.kind !== "original" && parentId) e.stemOf = parentId; }
-    let library = [...this.music.library, ...entries.map(({ kind, ...e }) => e)];
-    if (parentId && Object.keys(stems).length) library = library.map(t => t.id === parentId ? { ...t, stems: { ...(t.stems || {}), ...stems } } : t);
+    let library = [...this.music.library];
+    // Re-rendering replaces the previous stem entries of the same kind (their files stay on the server).
+    const replaced = new Set(Object.keys(stems).map(kind => library.find(t => t.id === parentId)?.stems?.[kind]).filter(Boolean));
+    library = library.filter(t => !replaced.has(t.id)).concat(entries.map(({ kind, ...e }) => ({ ...e, ...(kind === "original" ? {} : { stemEngine: engine }) })));
+    if (parentId && Object.keys(stems).length) library = library.map(t => t.id === parentId ? { ...t, stems: { ...(t.stems || {}), ...stems }, stemEngine: engine } : t);
     await this.music.saveLibrary(library);
     return entries.map(({ kind, ...e }) => e);
   }

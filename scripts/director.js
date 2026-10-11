@@ -166,7 +166,7 @@ export class Director {
   playRule(rule, base=50, reason='Cue', manualTest=false) {
     const track=this.library.find(t=>t.id === rule.libraryId);
     if(!track) { console.warn(`${MODULE_ID}: missing track for ${reason}`); return false; }
-    this.watch.issue('TRIGGER',{url:track.url,title:track.title,loop:rule.loop ?? track.loop,fx:trackFx(track),
+    this.watch.issue('TRIGGER',{url:track.url,title:track.title,loop:rule.loop ?? track.loop,fx:trackFx(track,this.library),
       action:rule.action === 'queue'?'queue':'interrupt',resume:Boolean(rule.resume),
       priority:priority(rule.priority,priority(base)),force:Boolean(rule.force),quiet:!manualTest});
     return true;
@@ -215,7 +215,7 @@ export class Director {
       switch(step.action) {
         case 'track': {
           const track=this.library.find(t=>t.id===step.refId);
-          if(track) this.watch.issue('TRIGGER',{url:track.url,title:track.title,loop:track.loop,fx:trackFx(track),
+          if(track) this.watch.issue('TRIGGER',{url:track.url,title:track.title,loop:track.loop,fx:trackFx(track,this.library),
             action:step.mode==='queue'?'queue':'interrupt',resume:Boolean(step.resume),priority:priority(step.priority,90),quiet:true});
           break;
         }

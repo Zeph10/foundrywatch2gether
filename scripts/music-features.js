@@ -1,6 +1,7 @@
 import { MODULE_ID, parseSource, trackFx, MAX_FADE, VOCAL_MODE_LABELS } from './state.js';
 import { raise, closeOnEscape, preserveScroll, confirmDialog } from './ui.js';
 import { Converter, isStreamingLink } from './convert.js';
+import { AiModels } from './ai-model.js';
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const id = () => globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const events = {
@@ -16,6 +17,7 @@ export class MusicFeatures {
   constructor(watch) {
     this.watch = watch; this.dialog = null; this.seen = new Set(); this.actorHint = ''; this.hpCache = new Map();
     this.converter = new Converter(this); this.convertStatus = null;
+    this.ai = new AiModels(); this.aiStatus = null;
   }
   get library() { return game.settings.get(MODULE_ID, 'musicLibrary') || []; }
   get triggers() { return game.settings.get(MODULE_ID, 'musicTriggers') || []; }
@@ -109,7 +111,7 @@ export class MusicFeatures {
   run(rule) {
     const track = this.library.find(x => x.id === rule.libraryId);
     if (!track) return false;
-    this.watch.issue('TRIGGER', {url:track.url, title:track.title, loop:track.loop, fx:trackFx(track),
+    this.watch.issue('TRIGGER', {url:track.url, title:track.title, loop:track.loop, fx:trackFx(track,this.library),
       action:rule.action === 'queue' ? 'queue':'interrupt', resume:Boolean(rule.resume),priority:Number(rule.priority ?? 50),quiet:true});
     return true;
   }
@@ -151,6 +153,8 @@ export class MusicFeatures {
   openManager(actorUuid = '') {
     if (!game.user.isGM) { ui.notifications?.warn('The music library and encounter triggers are GM-managed.'); return; }
     this.actorHint = actorUuid || this.actorHint || '';
+    // Check this browser's AI model in the background, then refresh the panel.
+    this.ai.info().then(() => this.renderManager());
     if (!this.dialog) {
       this.dialog = document.createElement('section'); this.dialog.id = 'fwr-manager';
       this.dialog.className = 'fwr-manager';
@@ -185,7 +189,8 @@ export class MusicFeatures {
       <div class="fwr-manager-inner">
         <header><h2><i class="fa-solid fa-music"></i> Watch Room · Music & Triggers</h2><div><button type="button" data-mgr="open-director">⚜ Cinematic Director</button> <button type="button" data-manager-close aria-label="Close manager">✕</button></div></header>
         <div class="fwr-manager-scroll">
-          <h3>Saved music library <small>${this.library.length} tracks</small></h3>
+          <h3>Saved music library <small>${this.library.length} tracks</small>
+            <button type="button" class="fwr-h3-action" data-mgr="prerender-all" title="Make instrumental and vocal versions of every file track that uses a vocal setting and doesn't have them yet" ${this.converter.busy ? 'disabled' : ''}>Pre-render tracks with vocal settings</button></h3>
           <p class="fwr-manager-note">Searchable, reusable tracks with tags and stable IDs. Use in boss profiles, cinematics, trigger rules and macros.</p>
           <input type="search" data-search-library placeholder="Search tracks, tags or category" aria-label="Search music library">
           <form data-library-form class="fwr-manager-form">
@@ -202,11 +207,12 @@ export class MusicFeatures {
           <label class="fwr-upload">Upload audio (MP3 / OGG / WAV / M4A / FLAC / AAC / OPUS)
             <input type="file" data-upload accept=".mp3,.ogg,.opus,.wav,.m4a,.aac,.flac,audio/*"></label>
           <div class="fwr-manager-list">${this.library.map(track => `<div class="fwr-manager-item" data-library-item data-search="${esc(`${track.title} ${track.category || ''} ${(track.tags || []).join(' ')}`.toLowerCase())}">
-            <span title="${esc(track.url)}">${esc(track.title)} <small>${esc(track.category||'')} ${esc((track.tags||[]).join(', '))}</small> ${track.loop ? '<small>↻ loop</small>':''}${({remove:'<small>♪ instrumental (live)</small>',isolate:'<small>♪ vocals only (live)</small>'})[track.vocalMode || (track.instrumental?'remove':'off')] || ''}${(track.fadeIn||track.fadeOut) ? `<small>fade ${esc(track.fadeIn||0)}s / ${esc(track.fadeOut||0)}s</small>`:''}${track.stems && Object.keys(track.stems).length ? `<small>stems: ${Object.keys(track.stems).map(k=>esc(k)).join(', ')}</small>`:''}</span>
+            <span title="${esc(track.url)}">${esc(track.title)} <small>${esc(track.category||'')} ${esc((track.tags||[]).join(', '))}</small> ${track.loop ? '<small>↻ loop</small>':''}${({remove:'<small>♪ instrumental (live)</small>',isolate:'<small>♪ vocals only (live)</small>'})[track.vocalMode || (track.instrumental?'remove':'off')] || ''}${(track.fadeIn||track.fadeOut) ? `<small>fade ${esc(track.fadeIn||0)}s / ${esc(track.fadeOut||0)}s</small>`:''}${track.stems && Object.keys(track.stems).length ? `<small>pre-rendered: ${Object.keys(track.stems).map(k=>esc(k)).join(', ')}${track.stemEngine === 'ai' ? ' (AI)' : ''}</small>`:''}</span>
             <button type="button" data-mgr="library-play" data-id="${esc(track.id)}" title="Play immediately">▶</button>
             <button type="button" data-mgr="library-queue" data-id="${esc(track.id)}" title="Queue">+</button>
             <button type="button" data-mgr="library-edit" data-id="${esc(track.id)}" title="Edit track title, category and tags">Edit</button>
             <button type="button" data-mgr="library-loop" data-id="${esc(track.id)}" title="Toggle saved track loop" aria-pressed="${Boolean(track.loop)}">↻</button>
+            <button type="button" data-mgr="library-prerender" data-id="${esc(track.id)}" title="${this.canPrerender(track) ? `Pre-render instrumental and vocal versions (${this.ai.status?.installed ? 'AI' : 'spectral'})` : 'Only audio/video files can be pre-rendered'}" ${this.canPrerender(track) && !this.converter.busy ? '' : 'disabled'}>✂</button>
             <button type="button" data-mgr="library-delete" data-id="${esc(track.id)}" title="Remove from library">✕</button></div>`).join('') || '<p>No saved tracks yet.</p>'}</div>
           <h3>Import &amp; convert <small>link, file or library track → MP3, instrumental and vocals</small></h3>
           <form data-convert-form class="fwr-convert">
@@ -219,6 +225,10 @@ export class MusicFeatures {
               <select name="libraryId" aria-label="Library track"><option value="">Choose a track</option>${this.library.filter(t=>!/^https?:\/\/(www\.)?(youtube|youtu\.be|vimeo|twitch)/i.test(t.url)).map(t=>`<option value="${esc(t.id)}">${esc(t.title)}</option>`).join('')}</select>
             </fieldset>
             <fieldset class="fwr-convert-out"><legend>Save to the library</legend>
+              <label class="fwr-convert-row">Separation <select name="engine">
+                <option value="ai" ${this.ai.status?.installed ? 'selected' : 'disabled'}>AI model (best quality, slower)${this.ai.status?.installed ? '' : ' — download it below'}</option>
+                <option value="spectral" ${this.ai.status?.installed ? '' : 'selected'}>Spectral (instant, lower quality)</option></select></label>
+              <label title="Runs the AI model twice per piece (on the sound and on its inverse) and averages: cleaner, twice as slow."><input type="checkbox" name="denoise" checked> Extra-clean AI pass (2× slower)</label>
               <label><input type="checkbox" name="original" checked> Full track (MP3)</label>
               <label><input type="checkbox" name="instrumental" checked> Instrumental (vocals removed)</label>
               <label><input type="checkbox" name="vocals"> Vocals only</label>
@@ -234,6 +244,7 @@ export class MusicFeatures {
               <span>${esc(this.convertStatus?.text || '')}</span></div>
             <p class="fwr-manager-note">Splitting works on stereo recordings: it removes what's mixed dead-centre in the vocal range. Links must point straight to a file and the site must allow downloads from other websites; otherwise download it and use “From your computer”. YouTube, Vimeo, Twitch and other streaming links can't be imported. Only import audio you have the right to use.</p>
           </form>
+          ${this.renderAiPanel()}
           <h3>Encounter & event triggers <small>${this.triggers.length} rules</small></h3>
           <form data-trigger-form class="fwr-trigger-form">
             <input name="name" placeholder="Trigger name, e.g. Boss Theme" required maxlength="100" aria-label="Trigger name">
@@ -264,6 +275,7 @@ export class MusicFeatures {
     this.dialog.querySelector('[name="actorPreset"]')?.addEventListener('change', e => {
       this.dialog.querySelector('[name="actorUuid"]').value = e.target.value;
     });
+    this.dialog.querySelector('[data-ai-file]')?.addEventListener('change', e => { const f = e.target.files?.[0]; if (f) this.aiInstall(f); e.target.value = ''; });
     this.dialog.querySelector('[data-upload]')?.addEventListener('change', async e => {
       const file = e.target.files?.[0]; if (!file) return;
       try { await this.upload(file); ui.notifications?.info(`Saved audio: ${file.name}`); }
@@ -277,6 +289,13 @@ export class MusicFeatures {
     const act = button.dataset.mgr; const key = button.dataset.id;
     if (act === 'open-director') return this.watch.director.open(this.actorHint);
     if (act === 'convert-cancel') return this.converter.cancel();
+    if (act === 'ai-install') return this.aiInstall();
+    if (act === 'ai-remove') {
+      if (!(await confirmDialog('Remove AI model?', 'It will be deleted from this browser. Pre-rendered tracks are not affected.'))) return;
+      await this.ai.remove(); return this.renderManager();
+    }
+    if (act === 'prerender-all') return this.prerenderAll();
+    if (act === 'library-prerender') return this.prerender(key);
     if (act === 'browse') return this.browse(path => {const el = this.dialog?.querySelector('[name="url"]'); if (el) el.value = path;});
     const track = this.library.find(x => x.id === key);
     if (act === 'library-play' && track) return this.playLibrary(track.id,{action:'interrupt',force:true});
@@ -311,6 +330,89 @@ export class MusicFeatures {
       count += (c.steps || []).filter(st => st.action === 'track' && st.refId === trackId).length;
     return count;
   }
+  canPrerender(track) {
+    try { return parseSource(track.url).provider === 'file' && !track.stemOf; } catch { return false; }
+  }
+
+  renderAiPanel() {
+    const st = this.ai.status, m = this.ai.model;
+    const mb = n => `${(n / 1e6).toFixed(0)} MB`;
+    const state = !st ? 'Checking this browser…' : st.installed ? `Installed in this browser (${mb(st.bytes)}).` : st.error ? `Unavailable: ${esc(st.error)}` : 'Not installed in this browser.';
+    return `<h3>AI vocal separation <small>${st?.installed ? 'ready' : 'optional'}</small></h3>
+      <div class="fwr-ai" data-ai-panel>
+        <p class="fwr-manager-note">Uses <strong>${esc(m.name)}</strong>, a neural network from the Ultimate Vocal Remover project, to separate vocals far more cleanly than the live splitter. It runs only on this GM's computer, when you pre-render or convert a track; the result is saved as ordinary audio files everyone can play. It will run on your <strong>${esc(this.ai.backendLabel)}</strong>. Rough time for a 4-minute song: ${this.ai.backend === 'webgpu' ? '1–3 minutes' : '5–15 minutes'}. The ${mb(m.bytes)} model is downloaded once from Hugging Face and kept in this browser.</p>
+        <div class="fwr-ai-row"><span data-ai-state>${state}</span></div>
+        <div class="fwr-ai-row">
+          <button type="button" data-mgr="ai-install" ${st?.installed ? 'hidden' : ''}>Download model (${mb(m.bytes)})</button>
+          <label class="fwr-ai-file" ${st?.installed ? 'hidden' : ''}>Load model file… <input type="file" data-ai-file accept=".onnx"></label>
+          <button type="button" data-mgr="ai-remove" ${st?.installed ? '' : 'hidden'}>Remove from this browser</button>
+        </div>
+        <div class="fwr-convert-status" data-ai-progress hidden><progress max="1" value="0"></progress><span></span></div>
+      </div>`;
+  }
+
+  setAiProgress(text, fraction = null) {
+    const box = this.dialog?.querySelector('[data-ai-progress]');
+    if (!box) return;
+    box.hidden = !text;
+    const bar = box.querySelector('progress');
+    bar.hidden = fraction === null; if (fraction !== null) bar.value = fraction;
+    box.querySelector('span').textContent = text || '';
+  }
+
+  async aiInstall(file = null) {
+    try {
+      if (file) { this.setAiProgress('Checking the model file…'); await this.ai.store(await file.arrayBuffer()); }
+      else await this.ai.install((f, host) => this.setAiProgress(`Downloading from ${host} · ${Math.round(f * 100)}%`, f));
+      ui.notifications?.info('Watch Room: AI model installed in this browser.');
+      this.renderManager();
+    } catch (error) { this.setAiProgress(error.message); }
+  }
+
+  /** Make instrumental + vocal versions for one library track. */
+  async prerender(trackId, { quiet = false, prefix = '' } = {}) {
+    const track = this.library.find(t => t.id === trackId);
+    if (!track || !this.canPrerender(track)) return null;
+    const engine = this.ai.status?.installed ? 'ai' : 'spectral';
+    return this.runConversion({ source: { libraryId: track.id }, title: track.title, category: track.category, engine, denoise: true,
+      strength: track.vocalStrength ?? 0.7, kbps: 192, outputs: { original: false, instrumental: true, vocals: true } }, { label: `${prefix ? `${prefix} · ` : ''}Pre-rendering “${track.title}”`, quiet });
+  }
+
+  async prerenderAll() {
+    const todo = this.library.filter(t => this.canPrerender(t) && (t.vocalMode && t.vocalMode !== 'off' || t.instrumental) && !(t.stems && Object.keys(t.stems).length));
+    if (!todo.length) { this.setConvertStatus({ done: true, text: 'Every track with a vocal setting already has pre-rendered versions. Use ✂ on a track to (re)render it.' }); return; }
+    for (const [i, t] of todo.entries()) {
+      const result = await this.prerender(t.id, { quiet: true, prefix: `${i + 1} of ${todo.length}` });
+      if (!result) break;
+    }
+  }
+
+  /** Run the converter with progress (and a time estimate) shown in the Import & convert box. */
+  async runConversion(options, { label = '', quiet = false } = {}) {
+    const started = Date.now();
+    const stageText = (stage, f) => {
+      let eta = '';
+      if (/AI separating/.test(stage) && f > 0.05 && f < 1) {
+        const left = (Date.now() - started) / f * (1 - f) / 1000;
+        eta = left > 90 ? ` · about ${Math.round(left / 60)} min left` : ` · about ${Math.max(5, Math.round(left / 5) * 5)} s left`;
+      }
+      return `${label ? `${label}: ` : ''}${stage}${f > 0 && f < 1 ? ` · ${Math.round(f * 100)}%` : '…'}${eta}`;
+    };
+    try {
+      this.setConvertStatus({ text: `${label ? `${label}: ` : ''}Starting…`, fraction: 0 });
+      const summary = await this.converter.run(options, (stage, fraction) => this.setConvertStatus({ text: stageText(stage, fraction), fraction }));
+      const names = summary.added.map(t => `“${t.title}”`).join(', ');
+      const how = summary.engine === 'ai' ? ` AI separation on the ${summary.backend === 'webgpu' ? 'graphics card' : `processor (${summary.workers} parallel)`}, ${Math.round((Date.now() - started) / 1000)} s.` : '';
+      this.setConvertStatus({ done: true, text: `${summary.added.length ? `Added ${names} to the library.` : 'Nothing was saved.'}${how} ${summary.notes.join(' ')}`.trim() });
+      if (!quiet) ui.notifications?.info(`Watch Room: ${label || `imported ${summary.title}`} finished.`);
+      return summary;
+    } catch (error) {
+      const text = error?.name === 'AbortError' ? 'Conversion cancelled.' : error.message;
+      this.setConvertStatus({ error: error?.name !== 'AbortError', done: true, text });
+      return null;
+    } finally { this.renderManager(); }
+  }
+
   /** Show conversion progress in place, without re-rendering the whole manager. */
   setConvertStatus(status) {
     this.convertStatus = status;
@@ -336,18 +438,9 @@ export class MusicFeatures {
     if (kind === 'file' && !source.file) return this.setConvertStatus({ text: 'Choose a file first.', error: true });
     if (kind === 'url' && isStreamingLink(source.url)) return this.setConvertStatus({ text: "YouTube, Vimeo, Twitch, Spotify and similar services don't allow downloading, so their links can't be imported. Use a file you own instead.", error: true });
     const options = { source, title: data.get('title'), category: data.get('category'), strength: Number(data.get('strength')), kbps: Number(data.get('kbps')),
+      engine: data.get('engine') === 'ai' && this.ai.status?.installed ? 'ai' : 'spectral', denoise: data.get('denoise') === 'on',
       outputs: { original: data.get('original') === 'on', instrumental: data.get('instrumental') === 'on', vocals: data.get('vocals') === 'on' } };
-    const stageText = (stage, f) => `${stage}${f > 0 && f < 1 ? ` · ${Math.round(f * 100)}%` : '…'}`;
-    try {
-      this.setConvertStatus({ text: 'Starting…', fraction: 0 });
-      const summary = await this.converter.run(options, (stage, fraction) => this.setConvertStatus({ text: stageText(stage, fraction), fraction }));
-      const names = summary.added.map(t => `“${t.title}”`).join(', ');
-      this.setConvertStatus({ done: true, text: `${summary.added.length ? `Added ${names} to the library.` : 'Nothing was saved.'} ${summary.notes.join(' ')}`.trim() });
-      ui.notifications?.info(`Watch Room: imported ${summary.title}.`);
-    } catch (error) {
-      const text = error?.name === 'AbortError' ? 'Conversion cancelled.' : error.message;
-      this.setConvertStatus({ error: error?.name !== 'AbortError', done: true, text });
-    }
+    await this.runConversion(options);
   }
 
   async managerSubmit(event) {

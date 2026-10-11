@@ -22,9 +22,25 @@ const DRIFT_FORCED = 0.75;
 const QUIET_REJECTIONS = new Set(["ENDED", "NEXT", "VOTE_TIMEOUT"]);
 /** Identifies the player a room entry needs: switching a video to/from pop-ups keeps its uid but needs a rebuild. */
 const vocalsOn = entry => Boolean(entry?.vocalMode && entry.vocalMode !== "off") || Boolean(entry?.instrumental);
-// Cross-origin files must be reloaded with CORS to use the vocal splitter, so that's part of the key too.
-const playerKey = entry => entry ? `${entry.uid}${entry.external ? ":external" : ""}${
-  vocalsOn(entry) && entry.provider === "file" && isCrossOrigin(entry.url) ? ":fx" : ""}` : null;
+const vocalModeOf = entry => entry?.vocalMode || (entry?.instrumental ? "remove" : "off");
+/** A pre-rendered version (stem) for the entry's vocal mode, if the track has one. */
+export const stemFor = entry => {
+  const kind = { remove: "instrumental", isolate: "vocals" }[vocalModeOf(entry)];
+  return kind && entry?.stems?.[kind] ? { kind, url: entry.stems[kind] } : null;
+};
+/** What the player actually loads: the stem file when there is one (no live processing), else the entry. */
+const playbackEntry = entry => {
+  const stem = stemFor(entry);
+  return stem ? { ...entry, url: stem.url, vocalMode: "off", instrumental: false, usingStem: stem.kind } : entry;
+};
+// Cross-origin files must be reloaded with CORS to use the live splitter, and a stem is a different file,
+// so both are part of the key.
+const playerKey = entry => {
+  if (!entry) return null;
+  const stem = stemFor(entry);
+  return `${entry.uid}${entry.external ? ":external" : ""}${stem ? `:stem-${stem.kind}`
+    : vocalsOn(entry) && entry.provider === "file" && isCrossOrigin(entry.url) ? ":fx" : ""}`;
+};
 /** Seconds used by the "Fade out" buttons when the track has no fade-out of its own. */
 const DEFAULT_MANUAL_FADE = 4;
 const LOOP_LABELS = { off: "Repeat: off", one: "Repeat: current track", queue: "Repeat: whole queue" };
@@ -214,7 +230,7 @@ class WatchRoom {
         if (!(actor.isGM || canControl(this.state,actor))) return;
         const track = this.music.library.find(t => t.id === intent.libraryId);
         if (!track) return;
-        intent = {type:'TRIGGER',url:track.url,title:track.title,loop:track.loop,fx:trackFx(track),
+        intent = {type:'TRIGGER',url:track.url,title:track.title,loop:track.loop,fx:trackFx(track,this.music.library),
           action:intent.action==='queue'?'queue':'interrupt',priority:Number(intent.priority ?? 50),
           resume:Boolean(intent.resume),force:Boolean(intent.force && actor.isGM),quiet:Boolean(intent.quiet)};
         if (!actor.isGM) actor = game.users.get(game.user.id);
@@ -225,9 +241,15 @@ class WatchRoom {
         const track = this.music.library.find(t => t.id === rule?.libraryId);
         if (!rule || !track) return;
         // Only the leader's trusted configuration determines what the trigger plays.
-        intent = {type:'TRIGGER',url:track.url,title:track.title,loop:track.loop,fx:trackFx(track),action:rule.action,resume:rule.resume,priority:rule.priority ?? 50};
+        intent = {type:'TRIGGER',url:track.url,title:track.title,loop:track.loop,fx:trackFx(track,this.music.library),action:rule.action,resume:rule.resume,priority:rule.priority ?? 50};
         // Don't grant arbitrary TRIGGER permission to users via the socket.
         if (!actor.isGM) actor = game.users.get(game.user.id);
+      }
+      // A file added by link that's also in the library brings its pre-rendered versions along.
+      if (intent?.type === "ADD" && !intent.fx?.stems) {
+        const track = this.music.library.find(t => t.url === intent.url && t.stems);
+        const stems = track && trackFx(track, this.music.library).stems;
+        if (stems) intent = { ...intent, fx: { ...(intent.fx || {}), stems } };
       }
       const old = game.settings.get(MODULE_ID, "roomState");
       const next = reduceWithAutoOpen(old, intent, actor, game.users,
@@ -937,12 +959,16 @@ class WatchRoom {
     this.showUnlock(false);
     const outgoing = this.adapter;
     const outgoingEntry = this.adapterEntry;
+    const outgoingKey = this.adapterKey;
+    this.adapterKey = playerKey(entry);
     const wasPlaying = Boolean(this.lastPlayingAt && Date.now() - this.lastPlayingAt < 1500);
     this.adapter = null;
     this.adapterEntry = entry;
     if (outgoing) {
-      const seconds = wasPlaying && entry && outgoingEntry?.uid !== entry.uid && !entry.external && !["external", "stream"].includes(outgoing.kind)
-        ? this.crossfadeSeconds(outgoingEntry, entry) : 0;
+      const playable = wasPlaying && entry && !entry.external && !["external", "stream"].includes(outgoing.kind);
+      // Same track, different version (original ↔ instrumental ↔ vocals): a short blend at the same point.
+      const versionSwitch = outgoingEntry?.uid === entry?.uid && outgoingKey !== this.adapterKey;
+      const seconds = !playable ? 0 : versionSwitch ? 0.6 : outgoingEntry?.uid !== entry.uid ? this.crossfadeSeconds(outgoingEntry, entry) : 0;
       if (seconds > 0) this.crossfadeOut(outgoing, seconds);
       else { try { outgoing.destroy(); } catch (err) { console.warn(err); } }
     }
@@ -954,7 +980,7 @@ class WatchRoom {
     this.setMessage(entry.external ? "" : `Loading ${entry.provider === "stream" ? "screen share" : entry.provider + " player"}…`);
     let timeout;
     try {
-      const adapter = await createAdapter(entry, mount, (status, detail, info) => this.playerEvent(status, entry.uid, detail, info), { streams: this.streams });
+      const adapter = await createAdapter(playbackEntry(entry), mount, (status, detail, info) => this.playerEvent(status, entry.uid, detail, info), { streams: this.streams });
       if (generation !== this.loadGeneration || this.hidden || !this.state.open || !adapter) {
         adapter?.destroy();
         // Forget the load so the next show() rebuilds the player instead of assuming it exists.
@@ -1037,7 +1063,8 @@ class WatchRoom {
   async applyVocals() {
     const adapter = this.adapter, entry = this.state.current;
     if (!adapter?.setVocals || !entry) return;
-    const mode = entry.vocalMode || (entry.instrumental ? "remove" : "off");
+    // A pre-rendered stem is already the right audio: no live processing on top.
+    const mode = stemFor(entry) ? "off" : vocalModeOf(entry);
     const result = await adapter.setVocals({ mode, strength: entry.vocalStrength ?? 0.7 });
     if (adapter !== this.adapter) return;
     this.applyVolume(true);
@@ -1155,14 +1182,16 @@ class WatchRoom {
     if (document.activeElement !== select) select.value = mode;
     select.disabled = !supported;
     const strength = q(panel, "[data-fx-strength]");
-    q(panel, "[data-fx-strength-row]").hidden = !supported || mode === "off";
+    const stem = stemFor(entry);
+    q(panel, "[data-fx-strength-row]").hidden = !supported || mode === "off" || Boolean(stem);
     if (document.activeElement !== strength) strength.value = String(entry.vocalStrength ?? 0.7);
     q(panel, "[data-fx-strength-out]").textContent = `${Math.round(Number(strength.value) * 100)}%`;
     q(panel, "[data-fx-note]").textContent = !supported
       ? (entry.external ? "Not available for pop-up videos."
         : "Only for audio/video files (uploads or direct links). YouTube, Vimeo and Twitch don't give access to their audio.")
-      : mode === "off" ? "Splits the voice from the music in stereo recordings, live for everyone."
-      : "Removes what's mixed dead-centre in the vocal range. Higher strength removes more but can sound watery; centred instruments (snare, solos) are affected too.";
+      : stem ? `Playing the pre-rendered ${stem.kind} version${entry.stems && this.music.library.find(t => t.url === stem.url)?.stemEngine === "ai" ? " (AI-separated)" : ""}.`
+      : mode === "off" ? `Splits the voice from the music, live for everyone.${entry.stems ? " Pre-rendered versions are ready for this track." : " For the best quality, pre-render this track in Music & Triggers."}`
+      : "Live: removes what's mixed dead-centre in the vocal range. Higher strength removes more but can sound watery. Pre-render the track (Music & Triggers) for AI-quality separation.";
     q(panel, '[data-act="find-instrumental"]').hidden = supported || !["youtube", "vimeo", "twitch"].includes(entry.provider);
     for (const input of panel.querySelectorAll("[data-fx-fade]")) {
       if (document.activeElement !== input) input.value = String(Number(entry[input.dataset.fxFade]) || 0);
@@ -1529,6 +1558,11 @@ Hooks.once("init", () => {
   game.settings.register(MODULE_ID, "iceServers", {
     name: "Screen share: ICE servers (advanced)",
     hint: 'JSON list of STUN/TURN servers for screen sharing, e.g. [{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]. Leave empty to use public STUN, which works on most home networks. Add a TURN server if players behind strict firewalls can\'t connect.',
+    scope: "world", config: true, type: String, default: ""
+  });
+  game.settings.register(MODULE_ID, "aiRuntimeUrl", {
+    name: "AI separation: runtime location (advanced)",
+    hint: "Folder URL of the ONNX Runtime Web 1.20.1 files used for AI vocal separation. Leave empty to load them from jsDelivr. Point it at your own copy (for example a folder in your Foundry data) if you play without internet.",
     scope: "world", config: true, type: String, default: ""
   });
   game.settings.register(MODULE_ID, "promptOnInitiative", {

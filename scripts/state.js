@@ -125,8 +125,30 @@ export function supportsInstrumental(entry) {
 }
 
 /** The fx a saved library track carries into the room. */
-export const trackFx = track => ({ fadeIn: track?.fadeIn || 0, fadeOut: track?.fadeOut || 0, instrumental: Boolean(track?.instrumental),
-  vocalMode: track?.vocalMode, vocalStrength: track?.vocalStrength });
+export function trackFx(track, library = []) {
+  const fx = { fadeIn: track?.fadeIn || 0, fadeOut: track?.fadeOut || 0, instrumental: Boolean(track?.instrumental),
+    vocalMode: track?.vocalMode, vocalStrength: track?.vocalStrength };
+  // Pre-rendered versions travel with the track as URLs, so the room can switch to them.
+  const stems = {};
+  for (const kind of ["instrumental", "vocals"]) {
+    const id = track?.stems?.[kind];
+    const stem = id && library.find(t => t.id === id);
+    if (stem?.url) stems[kind] = stem.url;
+  }
+  if (Object.keys(stems).length) fx.stems = stems;
+  return fx;
+}
+
+/** Pre-rendered stem URLs that are safe to play (direct files only). */
+function cleanStems(stems) {
+  const out = {};
+  for (const kind of ["instrumental", "vocals"]) {
+    const url = stems?.[kind];
+    if (typeof url !== "string") continue;
+    try { if (parseSource(url).provider === "file") out[kind] = url; } catch { /* drop invalid */ }
+  }
+  return Object.keys(out).length ? out : undefined;
+}
 
 export const VOCAL_MODE_LABELS = Object.freeze({ off: "Original", remove: "Remove vocals (instrumental)", isolate: "Vocals only" });
 
@@ -138,13 +160,16 @@ export function cleanFx(fx = {}, entry = {}) {
   let vocalMode = ["off", "remove", "isolate"].includes(fx.vocalMode) ? fx.vocalMode : (fx.instrumental ? "remove" : "off");
   if (!supportsInstrumental(entry)) vocalMode = "off";
   const strength = Number(fx.vocalStrength);
-  return {
+  const out = {
     fadeIn: fadeSeconds(fx.fadeIn),
     fadeOut: fadeSeconds(fx.fadeOut),
     vocalMode,
     vocalStrength: Number.isFinite(strength) ? Math.round(Math.max(0.1, Math.min(1, strength)) * 20) / 20 : 0.7,
     instrumental: vocalMode === "remove"
   };
+  const stems = supportsInstrumental(entry) ? cleanStems(fx.stems) : undefined;
+  if (stems) out.stems = stems;
+  return out;
 }
 
 const clamp01 = v => Math.max(0, Math.min(1, v));
@@ -342,7 +367,7 @@ export function reduceIntent(previous, intent, actor, users, minimumRole, now) {
         if (!entry || !EXTERNAL_PROVIDERS.has(entry.provider)) return null;
         if (Boolean(entry.external) === Boolean(intent.external)) return null;
         entry.external = Boolean(intent.external);
-        if (!supportsInstrumental(entry)) Object.assign(entry, { instrumental: false, vocalMode: "off" });
+        if (!supportsInstrumental(entry)) { Object.assign(entry, { instrumental: false, vocalMode: "off" }); delete entry.stems; }
         break;
       }
       case "SHARE_START": {
@@ -396,7 +421,7 @@ export function reduceIntent(previous, intent, actor, users, minimumRole, now) {
         if (fx.instrumental !== undefined && fx.vocalMode === undefined) fx.vocalMode = fx.instrumental ? "remove" : "off";
         const before = cleanFx(entry, entry);
         const next = cleanFx({ ...before, ...fx }, entry);
-        if (Object.keys(next).every(k => next[k] === before[k])) return null;
+        if (JSON.stringify(next) === JSON.stringify(before)) return null;
         Object.assign(entry, next);
         break;
       }

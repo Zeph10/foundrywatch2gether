@@ -353,3 +353,11 @@
 /* Button resets above set display:inline-flex, which would otherwise override the hidden attribute. */
 #fwr-manager [hidden], #fwr-director [hidden] { display:none !important; }
 #fwr-manager input[type="range"] { accent-color:#c5a362; }
+/* v1.7 — AI separation and pre-rendering */
+#fwr-manager h3 .fwr-h3-action { float:right; font-size:11px; padding:3px 8px; font-weight:400; }
+#fwr-manager .fwr-ai { border:1px solid #534832; border-radius:4px; padding:8px 10px; margin-bottom:14px; display:flex; flex-direction:column; gap:6px; }
+#fwr-manager .fwr-ai .fwr-manager-note { margin:0; }
+#fwr-manager .fwr-ai-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; color:#e7d3a8; font-size:12px; }
+#fwr-manager .fwr-ai-file { display:inline-flex; align-items:center; gap:6px; padding:5px 9px; border:1px dashed #7e663f; border-radius:4px; cursor:pointer; color:#ebce91; font-size:12px; }
+#fwr-manager .fwr-ai-file input { width:auto; padding:0; }
+#fwr-manager [data-mgr="library-prerender"] { font-size:12px; }

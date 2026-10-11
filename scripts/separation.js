@@ -28,7 +28,7 @@ export function strengthParams(strength = 0.7) {
 }
 
 /** In-place radix-2 complex FFT with cached tables. `inverse` gives the unscaled inverse. */
-class FFT {
+export class FFT {
   constructor(n) {
     this.n = n;
     this.rev = new Uint32Array(n);
