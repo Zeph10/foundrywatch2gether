@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.5.1 — 2026-10-11
+
+- Manifest now declares `"persistentStorage": true`. Foundry requires it for the Music Library's **Upload audio** button, which saves files into the module's own storage folder (`Data/modules/foundry-watch-room/storage/`). Those files survive module updates.
+
 ## 1.5.0 — 2026-10-11
 
 ### Instrumental mode (vocal reduction)

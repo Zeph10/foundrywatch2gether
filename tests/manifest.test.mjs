@@ -11,4 +11,6 @@ test('manifest contains loadable V14 assets and matches module ID',()=>{
   assert.equal(m.compatibility.verified,'14.368');
   for(const relative of [...m.esmodules,...m.styles]) assert.ok(existsSync(resolve(root,relative)),`Missing ${relative}`);
   assert.equal(m.socket,true);
+  // The Music Library uploads audio into the module's storage folder (FilePicker.uploadPersistent).
+  assert.equal(m.persistentStorage,true);
 });
