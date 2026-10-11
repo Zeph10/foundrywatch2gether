@@ -11,6 +11,57 @@
  *      { type: "done", encoder, similarity, files: [{ kind, buffer, mime, ext }] } or { type: "error", message }
  */
 import { splitOffline, MONO_SIMILARITY } from "./separation.js";
+import { MdxSeparator } from "./ai-core.js";
+
+/**
+ * AI separation with an MDX-Net model through ONNX Runtime Web, in a small pool of inference workers.
+ * WebGPU (graphics card) runs one session; on the processor several single-threaded sessions run in
+ * parallel on separate cores. Resolves { instrumental, vocals, backend, workers }.
+ */
+export async function aiSeparate(left, right, sampleRate, { modelBuffer, ortBase, params, denoise = true, onProgress, workers: wanted } = {}) {
+  if (sampleRate !== 44100) throw new Error("The AI model needs 44.1 kHz audio.");
+  const cores = globalThis.navigator?.hardwareConcurrency || 2;
+  const start = async (provider, count) => {
+    const pool = await Promise.all(Array.from({ length: count }, () => new Promise((resolve, reject) => {
+      const w = new Worker(new URL("./ai-infer-worker.js", import.meta.url), { type: "module" });
+      w.onmessage = ({ data }) => data.type === "ready" ? resolve(w) : (w.terminate(), reject(new Error(data.message)));
+      w.onerror = e => { w.terminate(); reject(new Error(e.message || "AI worker failed to start")); };
+      w.postMessage({ type: "init", modelBuffer: modelBuffer.slice(0), ortBase, provider });
+    })).map(p => p.catch(e => e)));
+    const ok = pool.filter(w => w instanceof Worker);
+    if (!ok.length) throw pool[0];
+    return ok;
+  };
+  let pool = null, backend = null, lastError = null;
+  // On the processor, one single-threaded model per core (keeping one free on bigger machines), at most 3
+  // to bound memory (each copy holds the 64 MB model plus working buffers).
+  const cpuWorkers = wanted || Math.max(1, Math.min(3, cores >= 4 ? cores - 1 : cores));
+  for (const [provider, count] of (globalThis.navigator?.gpu ? [["webgpu", 1]] : []).concat([["wasm", cpuWorkers]])) {
+    try { pool = await start(provider, count); backend = provider; break; } catch (error) { lastError = error; }
+  }
+  if (!pool) {
+    const why = String(lastError?.message || lastError);
+    throw new Error(/import|fetch|load/i.test(why) ? `Couldn't load the AI runtime from ${ortBase}. Check your internet connection (it's downloaded once, then cached).` : `The AI model couldn't start: ${why}`);
+  }
+  const dims = [1, 4, params.dimF, params.dimT];
+  const idle = [...pool], waiting = [], pending = new Map();
+  let nextId = 0;
+  for (const w of pool) w.onmessage = ({ data }) => {
+    const job = pending.get(data.id); pending.delete(data.id);
+    if (idle.push(w), waiting.length) waiting.shift()();
+    if (!job) return;
+    data.type === "result" ? job.resolve(data.data) : job.reject(new Error(data.message));
+  };
+  const run = async data => {
+    while (!idle.length) await new Promise(r => waiting.push(r));
+    const w = idle.shift(), id = nextId++;
+    return new Promise((resolve, reject) => { pending.set(id, { resolve, reject }); w.postMessage({ type: "run", id, data, dims }, [data.buffer]); });
+  };
+  try {
+    const result = await new MdxSeparator(params, run).separate(left, right, { denoise, onProgress, concurrency: pool.length });
+    return { ...result, backend, workers: pool.length };
+  } finally { pool.forEach(w => w.terminate()); }
+}
 
 const LAME_SOURCES = [
   new URL("../vendor/lamejs/lame.min.js", import.meta.url).href,
@@ -95,12 +146,19 @@ export function encodeWav(left, right, sampleRate) {
 
 // Only wire up the message handler inside an actual worker (the encoders are also imported by tests).
 if (globalThis.WorkerGlobalScope && globalThis instanceof globalThis.WorkerGlobalScope) self.onmessage = async event => {
-  const { left, right, sampleRate, outputs = {}, strength = 0.7, kbps = 192, format = "mp3" } = event.data || {};
+  const { left, right, sampleRate, outputs = {}, strength = 0.7, kbps = 192, format = "mp3", engine = "spectral", ai } = event.data || {};
   try {
     const wantSplit = outputs.instrumental || outputs.vocals;
     const stems = {};
     let similarity = null;
-    if (wantSplit) {
+    let backend = null, aiWorkers = 0;
+    if (wantSplit && engine === "ai") {
+      progress("Loading AI model", 0);
+      const result = await aiSeparate(left, right, sampleRate, { ...ai, onProgress: f => progress("AI separating vocals", f) });
+      backend = result.backend; aiWorkers = result.workers;
+      if (outputs.instrumental) stems.instrumental = limit(...result.instrumental);
+      if (outputs.vocals) stems.vocals = limit(...result.vocals);
+    } else if (wantSplit) {
       const result = splitOffline(left, right, sampleRate, {
         strength, instrumental: Boolean(outputs.instrumental), vocals: Boolean(outputs.vocals),
         onProgress: f => progress("Separating vocals", f)
@@ -129,7 +187,7 @@ if (globalThis.WorkerGlobalScope && globalThis instanceof globalThis.WorkerGloba
       const buffer = lame ? encodeMp3(lame.lib, l, r, sampleRate, kbps, f => progress(stage, f)) : encodeWav(l, r, sampleRate);
       files.push({ kind, buffer, mime: lame ? "audio/mpeg" : "audio/wav", ext: lame ? "mp3" : "wav" });
     }
-    post({ type: "done", encoder, encoderSource: lame?.source || null, similarity, files }, files.map(f => f.buffer));
+    post({ type: "done", encoder, encoderSource: lame?.source || null, similarity, files, engine, backend, aiWorkers }, files.map(f => f.buffer));
   } catch (error) {
     post({ type: "error", message: error?.message || String(error) });
   }

@@ -1,0 +1,31 @@
+<!doctype html><meta charset="utf-8"><title>AI separation evaluation</title><body><script type="module">
+// Scores the module's separation engines on songs with known stems (SDR, dB; higher is better).
+const decode = async url => { const b = await new OfflineAudioContext(2, 1, 44100).decodeAudioData(await (await fetch(url)).arrayBuffer()); return [b.getChannelData(0).slice(), b.getChannelData(1).slice()]; };
+const sdr = (ref, est) => { let s = 0, e = 0; for (let c = 0; c < 2; c++) for (let i = 0; i < ref[c].length; i++) { s += ref[c][i] ** 2; e += (ref[c][i] - (est[c][i] || 0)) ** 2; } return +(10 * Math.log10(s / Math.max(e, 1e-12))).toFixed(2); };
+async function separate(mix, engine, extra = {}) {
+  const [L, R] = [mix[0].slice(), mix[1].slice()];
+  const w = new Worker('./module/scripts/convert-worker.js', { type: 'module' });
+  const t0 = performance.now();
+  const res = await new Promise((resolve, reject) => { w.onmessage = e => { const d = e.data; if (d.type === 'done') resolve(d); else if (d.type === 'error') reject(new Error(d.message)); }; w.onerror = e => reject(new Error(e.message)); w.postMessage({ left: L, right: R, sampleRate: 44100, outputs: { instrumental: true, vocals: true }, format: 'wav', engine, strength: 0.7, ...extra }, [L.buffer, R.buffer]); });
+  w.terminate();
+  const dec = async kind => { const f = res.files.find(x => x.kind === kind); const b = await new OfflineAudioContext(2, 1, 44100).decodeAudioData(f.buffer.slice(0)); return [b.getChannelData(0), b.getChannelData(1)]; };
+  return { inst: await dec('instrumental'), voc: await dec('vocals'), seconds: +((performance.now() - t0) / 1000).toFixed(1), backend: res.backend, workers: res.aiWorkers };
+}
+try {
+  const songs = await (await fetch('songs/index.json')).json();
+  const model = await (await fetch('model.onnx')).arrayBuffer();
+  const ai = denoise => ({ ai: { modelBuffer: model.slice(0), ortBase: new URL('ort/', location.href).href, params: { nFft: 6144, hop: 1024, dimF: 3072, dimT: 256, compensate: 1.022 }, denoise } });
+  const results = [];
+  for (const name of songs) {
+    const mix = await decode(`songs/${name}.mix.wav`), voc = await decode(`songs/${name}.vocals.wav`), acc = await decode(`songs/${name}.accompaniment.wav`);
+    const row = { song: name, seconds: +(mix[0].length / 44100).toFixed(1), doNothing: { instrumental: sdr(acc, mix), vocals: sdr(voc, mix) } };
+    for (const [label, engine, extra] of [['spectral', 'spectral', {}], ['ai', 'ai', ai(false)], ['aiClean', 'ai', ai(true)]]) {
+      const r = await separate(mix, engine, extra);
+      row[label] = { instrumental: sdr(acc, r.inst), vocals: sdr(voc, r.voc), processingSeconds: r.seconds, backend: r.backend, workers: r.workers };
+    }
+    results.push(row);
+  }
+  const avg = key => Object.fromEntries(['instrumental', 'vocals'].map(k => [k, +(results.reduce((n, r) => n + r[key][k], 0) / results.length).toFixed(2)]));
+  window.__result = { hardwareConcurrency: navigator.hardwareConcurrency, songs: results, average: { doNothing: avg('doNothing'), spectral: avg('spectral'), ai: avg('ai'), aiClean: avg('aiClean') } };
+} catch (e) { window.__result = { error: e.message, stack: e.stack }; }
+</script></body>

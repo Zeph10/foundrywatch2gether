@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "tools or cleanup"
+        description: "tools, eval or cleanup"
         required: true
         default: "tools"
 
@@ -93,6 +93,43 @@ jobs:
           print(json.dumps(results, indent=1))
           PY
           cat cors.json | head -150
+
+      - name: Evaluate separation on real songs (MUSDB18 previews; audio stays on this runner)
+        if: inputs.mode == 'eval'
+        run: |
+          sudo apt-get install -y ffmpeg >/dev/null 2>&1 || true
+          pip install --quiet musdb soundfile numpy
+          mkdir -p evalsite/songs evalsite/module && cd evalsite
+          cp ../.github/lab/ai-eval.html ../.github/lab/ai-eval.mjs ../.github/lab/serve.mjs .
+          cp -r ../scripts module/scripts
+          npm init -y >/dev/null && npm install --silent onnxruntime-web@1.20.1 playwright@1.56.0
+          npx playwright install --with-deps chromium >/dev/null
+          cp -r node_modules/onnxruntime-web/dist ort
+          curl -fsSL -o model.onnx https://huggingface.co/nomadkaraoke/public_uvr_models/resolve/main/UVR-MDX-NET-Inst_HQ_3.onnx
+          echo "317554b07fe1ea5279a77f2b1520a41ea4b93432560c4ffd08792c30fddf9adc  model.onnx" | sha256sum -c
+          python - <<'PY'
+          import musdb, soundfile as sf, numpy as np, json
+          db = musdb.DB(download=True, subsets='test')
+          picked = []
+          for track in db.tracks:
+              voc = track.targets['vocals'].audio
+              if np.sqrt(np.mean(voc ** 2)) < 0.03: continue
+              name = ''.join(c if c.isalnum() else '_' for c in track.name)[:40]
+              for stem, audio in [('mix', track.audio), ('vocals', voc), ('accompaniment', track.targets['accompaniment'].audio)]:
+                  sf.write(f'songs/{name}.{stem}.wav', audio, track.rate, subtype='FLOAT')
+              picked.append(name)
+              if len(picked) == 5: break
+          json.dump(picked, open('songs/index.json', 'w')); print(picked)
+          PY
+          (node serve.mjs "$PWD" 8800 &) ; sleep 2
+          node ai-eval.mjs 8800 ../lab-eval.json
+          cd .. && mkdir -p lab && mv lab-eval.json lab/eval.json
+
+      - name: Publish evaluation
+        if: always() && inputs.mode == 'eval'
+        run: |
+          mkdir -p lab && test -f lab/eval.json || echo '{"error":"evaluation did not finish"}' > lab/eval.json
+          gh release upload lab-tools lab/eval.json --clobber
 
       - name: Publish lab pre-release
         if: always() && inputs.mode == 'tools'
