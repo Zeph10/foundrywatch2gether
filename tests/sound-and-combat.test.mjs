@@ -15,9 +15,10 @@ const file = 'worlds/w/music/battle.mp3';
 test('instrumental only applies to direct files; fades are clamped', () => {
   assert.equal(supportsInstrumental(parseSource(file)), true);
   assert.equal(supportsInstrumental(parseSource('https://youtu.be/dQw4w9WgXcQ')), false);
-  assert.deepEqual(cleanFx({ fadeIn: 3.26, fadeOut: 999, instrumental: true }, parseSource(file)), { fadeIn: 3.3, fadeOut: 60, instrumental: true });
-  assert.deepEqual(cleanFx({ fadeIn: -2, instrumental: true }, parseSource('https://youtu.be/dQw4w9WgXcQ')), { fadeIn: 0, fadeOut: 0, instrumental: false });
-  assert.deepEqual(trackFx({ fadeIn: 2, instrumental: 1 }), { fadeIn: 2, fadeOut: 0, instrumental: true });
+  assert.deepEqual(cleanFx({ fadeIn: 3.26, fadeOut: 999, instrumental: true }, parseSource(file)), { fadeIn: 3.3, fadeOut: 60, vocalMode: 'remove', vocalStrength: 0.7, instrumental: true });
+  assert.equal(cleanFx({ vocalMode: 'isolate', vocalStrength: 2 }, parseSource(file)).vocalStrength, 1);
+  assert.deepEqual(cleanFx({ fadeIn: -2, instrumental: true }, parseSource('https://youtu.be/dQw4w9WgXcQ')), { fadeIn: 0, fadeOut: 0, vocalMode: 'off', vocalStrength: 0.7, instrumental: false });
+  assert.deepEqual(trackFx({ fadeIn: 2, instrumental: 1 }), { fadeIn: 2, fadeOut: 0, instrumental: true, vocalMode: undefined, vocalStrength: undefined });
 });
 
 test('fade-in follows the room clock from the start and again after a pause; loops do not re-fade', () => {

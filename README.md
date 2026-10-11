@@ -78,11 +78,20 @@ game.modules.get('foundry-watch-room').api.trigger('Boss Entrance');
 
 Only the GM or permitted live playback controllers can invoke a configured manual trigger. See the music manager for the exact name.
 
-## Track sound: instrumental mode and fades
+## Splitting vocals and importing tracks
+
+**Live, in the room.** The **Track sound** panel's **Vocals** setting offers *Original*, *Remove vocals (instrumental)* and *Vocals only*, with a **Strength** slider. It works on audio/video files (uploads, or direct links whose server allows it). The splitter looks at every frequency separately and takes out only what is mixed dead-centre in the vocal range. Stereo width, bass, cymbals and off-centre instruments stay as they are.
+
+**Saved, in the library.** *Music & Triggers → Import & convert* takes a direct file link, a file from your computer, or an existing library track. It saves any of: the full track as MP3, an instrumental, and a vocals-only version. The files go into the module's storage folder (kept across updates) and appear in the library, linked as stems. YouTube/Vimeo/Twitch/Spotify links can't be imported; their terms don't allow downloading. If a site blocks downloads from other websites, download the file and choose *From your computer*.
+
+**What to expect.** This is the classic "centre extraction" approach, done carefully. It works well on typical studio mixes with a centred lead vocal. It can't separate the voice from other instruments that sit in the centre at the same pitch (snare, lead guitar, piano solo). Strong reverb on the voice and double-tracked or wide harmonies partly survive. Mono recordings can't be split at all. For the cleanest results, separate the song with an AI stem tool first (see below), then import the instrumental with *From your computer*.
+
+**Best quality: AI stem separation.** Free desktop tools such as **Ultimate Vocal Remover** (UVR5, using MDX-Net or Demucs models) or **Demucs** separate vocals far better than any filter, because they're trained on real music. They produce separate vocal, drums, bass and other tracks. Run one on your computer, then import the result.
+
+## Track sound: fades
 
 Controllers see a **Track sound** panel in the queue sidebar. Its settings apply to everyone:
 
-- **Instrumental (reduce vocals)** removes centre-panned vocals from audio/video **files** (uploaded to Foundry, or direct links whose server allows CORS). It's the classic mid/side technique done live in the browser. It works well on typical studio mixes where the lead vocal sits in the middle. It can't remove vocals that are panned or double-tracked wide, and it thins out other centred instruments a little. Mono recordings can't be separated, and the room says so. For YouTube/Vimeo/Twitch, the panel offers a search for an instrumental version instead. For an important track, a real instrumental file always sounds best.
 - **Fade in / Fade out** (seconds) for the current track. Set defaults per track in the Music Library; they carry into triggers, boss phases and cinematics.
 - **Fade out & pause** / **Fade to next** for ending a scene smoothly.
 - **Crossfade between tracks** (Module Settings) blends one track into the next. A track's own fade-in/out takes precedence.
@@ -150,6 +159,10 @@ Foundry will then offer updates whenever a new release is published.
 - **Hide X / Escape:** Hides the local window; **does not close the shared room**. Re-open it with the launcher (which toggles) or the scene-control button. The floating launcher can be turned off in Module Settings.
 - **End room:** Host or GM closes the shared room for everybody (asks for confirmation).
 - **Start room:** Permission threshold is configured in Foundry Module Settings.
+
+## Third-party code
+
+- **lamejs 1.2.1** (MP3 encoder, https://github.com/zhuker/lamejs), LGPL-3.0, bundled unmodified in release builds at `vendor/lamejs/` with its licence. It runs only when you use Import & convert.
 
 ## Developer notes
 

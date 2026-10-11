@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.6.0 — 2026-10-11
+
+### Vocal splitter (replaces the simple instrumental filter)
+- New spectral splitter. It looks at each frequency separately and removes only what's mixed dead-centre (lead vocals) within the vocal range. It keeps the stereo image, the bass, cymbals and anything panned off-centre. The old method subtracted left from right across the whole spectrum, which collapsed the mix to mono and dulled it.
+- Three modes, live for everyone: **Original**, **Remove vocals (instrumental)**, **Vocals only**, with a **Strength** slider. Runs on the browser's audio thread (AudioWorklet); older browsers fall back to the previous filter.
+- Measured on a synthetic test mix: centred "voice" −21 dB at default strength (−95 dB at full), side instruments unchanged. The vocals-only output keeps the voice at full level with instruments below −100 dB. Real songs separate less cleanly than test tones, because other centred instruments share the vocal range.
+
+### Import & convert (Music & Triggers)
+- Bring in a track from a **direct link to an audio/video file**, **a file on your computer**, or **a track already in the library**. Choose any of **Full track (MP3)**, **Instrumental**, **Vocals only**, the split strength and MP3 quality. The files are saved to the module's storage folder and added to the library, linked to each other as stems.
+- Runs entirely in the GM's browser in a background worker (a 4-minute song splits in roughly 8–15 s). Mono recordings are saved whole with an explanation.
+- MP3 encoding uses lamejs (LGPL-3.0), bundled in the release under `vendor/lamejs/`, with a CDN fallback. If neither loads, files are saved as WAV.
+- YouTube, Vimeo, Twitch, Spotify and similar streaming links are deliberately not downloadable; their terms forbid it. Links from sites that block cross-site downloads get a clear "download it yourself, then upload" message.
+
+### Fixed
+- Hidden buttons in the music manager and Director could still show (a style rule overrode `hidden`).
+
 ## 1.5.1 — 2026-10-11
 
 - Manifest now declares `"persistentStorage": true`. Foundry requires it for the Music Library's **Upload audio** button, which saves files into the module's own storage folder (`Data/modules/foundry-watch-room/storage/`). Those files survive module updates.

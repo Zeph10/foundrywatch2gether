@@ -1,7 +1,10 @@
 /**
  * Client-side audio effects for direct audio/video files, built on the Web Audio API.
  *
- * Vocal reduction ("instrumental mode") uses mid/side processing. Lead vocals in most stereo mixes are
+ * The main vocal splitter is spectral (separation.js, run in an AudioWorklet via VocalSplitter).
+ * VocalReducer below is the simpler fallback for browsers without AudioWorklet.
+ *
+ * Fallback vocal reduction uses mid/side processing. Lead vocals in most stereo mixes are
  * panned dead centre, so they are identical in the left and right channels. Subtracting one channel
  * from the other (the "side" signal) cancels everything centred, vocals included, and keeps
  * instruments panned to either side. Bass and kick drum are usually centred too, so the low end of
@@ -129,6 +132,76 @@ export class VocalReducer {
       };
       tick();
     });
+  }
+}
+
+const workletLoads = new WeakMap();
+/** Load the splitter worklet into `ctx` once. Resolves false where AudioWorklet isn't available. */
+function loadSplitterWorklet(ctx) {
+  if (!ctx?.audioWorklet) return Promise.resolve(false);
+  if (!workletLoads.has(ctx)) {
+    workletLoads.set(ctx, ctx.audioWorklet.addModule(new URL("./splitter-worklet.js", import.meta.url).href)
+      .then(() => true, error => { console.warn("Watch Room | vocal splitter worklet failed to load", error); return false; }));
+  }
+  return workletLoads.get(ctx);
+}
+
+/**
+ * Live vocal splitter for a media element: spectral centre extraction on the audio thread
+ * (separation.js). Modes: "off" (original), "remove" (instrumental), "isolate" (vocals only).
+ * Falls back to the simpler mid/side VocalReducer where AudioWorklet isn't supported.
+ */
+export class VocalSplitter {
+  static async create(element, ctx = audioContext()) {
+    if (!ctx) throw new Error("This browser doesn't support Web Audio.");
+    if (await loadSplitterWorklet(ctx)) return new VocalSplitter(element, ctx);
+    return new LegacySplitter(new VocalReducer(element, ctx));
+  }
+
+  constructor(element, ctx) {
+    this.ctx = ctx;
+    const source = ctx.createMediaElementSource(element);
+    element.volume = 1; // volume is applied by `this.output`
+    this.node = new AudioWorkletNode(ctx, "fwr-vocal-splitter", {
+      numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2],
+      channelCount: 2, channelCountMode: "explicit", channelInterpretation: "speakers"
+    });
+    this.output = ctx.createGain();
+    source.connect(this.node);
+    this.node.connect(this.output);
+    this.output.connect(ctx.destination);
+    this.similarity = null;
+    this.node.port.onmessage = event => { if (event.data?.similarity !== undefined) this.similarity = event.data.similarity; };
+  }
+
+  setMode(mode, strength = 0.7) {
+    this.node.port.postMessage({ mode, strength });
+    return { ok: true };
+  }
+
+  setVolume(v) {
+    this.output.gain.setTargetAtTime(Math.max(0, Math.min(1, v)), this.ctx.currentTime, 0.03);
+  }
+
+  /** Centre similarity of the vocal band, measured while playing (≈1 means mono). null = no data yet. */
+  async measureCentre(ms = 2500) {
+    this.similarity = null;
+    await new Promise(resolve => setTimeout(resolve, ms));
+    return this.similarity;
+  }
+}
+
+/** Mid/side fallback with the VocalSplitter interface. It can only remove, not isolate. */
+class LegacySplitter {
+  constructor(reducer) { this.reducer = reducer; }
+  setMode(mode) {
+    this.reducer.setEnabled(mode === "remove");
+    return mode === "isolate" ? { ok: false, reason: "“Vocals only” needs a newer browser (AudioWorklet support)." } : { ok: true };
+  }
+  setVolume(v) { this.reducer.setVolume(v); }
+  async measureCentre(ms) {
+    const ratio = await this.reducer.measureStereo(ms);
+    return ratio === null ? null : ratio < 0.04 ? 1 : 0.5;
   }
 }
 

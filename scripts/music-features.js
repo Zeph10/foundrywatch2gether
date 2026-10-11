@@ -1,5 +1,6 @@
-import { MODULE_ID, parseSource, trackFx, MAX_FADE } from './state.js';
+import { MODULE_ID, parseSource, trackFx, MAX_FADE, VOCAL_MODE_LABELS } from './state.js';
 import { raise, closeOnEscape, preserveScroll, confirmDialog } from './ui.js';
+import { Converter, isStreamingLink } from './convert.js';
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const id = () => globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const events = {
@@ -12,7 +13,10 @@ const getNode = html => html instanceof HTMLElement ? html : html?.[0] instanceo
 const has = (o, key) => Object.prototype.hasOwnProperty.call(o || {}, key);
 
 export class MusicFeatures {
-  constructor(watch) { this.watch = watch; this.dialog = null; this.seen = new Set(); this.actorHint = ''; this.hpCache = new Map(); }
+  constructor(watch) {
+    this.watch = watch; this.dialog = null; this.seen = new Set(); this.actorHint = ''; this.hpCache = new Map();
+    this.converter = new Converter(this); this.convertStatus = null;
+  }
   get library() { return game.settings.get(MODULE_ID, 'musicLibrary') || []; }
   get triggers() { return game.settings.get(MODULE_ID, 'musicTriggers') || []; }
   rememberHP(actor) {
@@ -192,18 +196,44 @@ export class MusicFeatures {
             <input name="tags" placeholder="Tags, comma-separated" maxlength="200">
             <label class="fwr-manager-inline">Fade in <input name="fadeIn" type="number" min="0" max="${MAX_FADE}" step="0.5" value="0"> s</label>
             <label class="fwr-manager-inline">Fade out <input name="fadeOut" type="number" min="0" max="${MAX_FADE}" step="0.5" value="0"> s</label>
-            <label class="fwr-manager-inline fwr-manager-check" title="Reduce centre-panned vocals. Audio/video files only (uploads or direct links), stereo mixes only."><input type="checkbox" name="instrumental"> Instrumental (reduce vocals)</label>
+            <label class="fwr-manager-inline" title="Live vocal splitter for audio/video files (uploads or direct links), stereo recordings only. For a cleaner result, use Import &amp; convert below to save separate instrumental and vocal files.">Vocals <select name="vocalMode">${Object.entries(VOCAL_MODE_LABELS).map(([k,v])=>`<option value="${k}">${esc(v)}</option>`).join('')}</select></label>
             <button type="button" data-mgr="browse">Browse server</button><button type="submit">Save / update track</button>
           </form>
           <label class="fwr-upload">Upload audio (MP3 / OGG / WAV / M4A / FLAC / AAC / OPUS)
             <input type="file" data-upload accept=".mp3,.ogg,.opus,.wav,.m4a,.aac,.flac,audio/*"></label>
           <div class="fwr-manager-list">${this.library.map(track => `<div class="fwr-manager-item" data-library-item data-search="${esc(`${track.title} ${track.category || ''} ${(track.tags || []).join(' ')}`.toLowerCase())}">
-            <span title="${esc(track.url)}">${esc(track.title)} <small>${esc(track.category||'')} ${esc((track.tags||[]).join(', '))}</small> ${track.loop ? '<small>↻ loop</small>':''}${track.instrumental ? '<small>♪ instrumental</small>':''}${(track.fadeIn||track.fadeOut) ? `<small>fade ${esc(track.fadeIn||0)}s / ${esc(track.fadeOut||0)}s</small>`:''}</span>
+            <span title="${esc(track.url)}">${esc(track.title)} <small>${esc(track.category||'')} ${esc((track.tags||[]).join(', '))}</small> ${track.loop ? '<small>↻ loop</small>':''}${({remove:'<small>♪ instrumental (live)</small>',isolate:'<small>♪ vocals only (live)</small>'})[track.vocalMode || (track.instrumental?'remove':'off')] || ''}${(track.fadeIn||track.fadeOut) ? `<small>fade ${esc(track.fadeIn||0)}s / ${esc(track.fadeOut||0)}s</small>`:''}${track.stems && Object.keys(track.stems).length ? `<small>stems: ${Object.keys(track.stems).map(k=>esc(k)).join(', ')}</small>`:''}</span>
             <button type="button" data-mgr="library-play" data-id="${esc(track.id)}" title="Play immediately">▶</button>
             <button type="button" data-mgr="library-queue" data-id="${esc(track.id)}" title="Queue">+</button>
             <button type="button" data-mgr="library-edit" data-id="${esc(track.id)}" title="Edit track title, category and tags">Edit</button>
             <button type="button" data-mgr="library-loop" data-id="${esc(track.id)}" title="Toggle saved track loop" aria-pressed="${Boolean(track.loop)}">↻</button>
             <button type="button" data-mgr="library-delete" data-id="${esc(track.id)}" title="Remove from library">✕</button></div>`).join('') || '<p>No saved tracks yet.</p>'}</div>
+          <h3>Import &amp; convert <small>link, file or library track → MP3, instrumental and vocals</small></h3>
+          <form data-convert-form class="fwr-convert">
+            <fieldset class="fwr-convert-source"><legend>Source</legend>
+              <label><input type="radio" name="source" value="url" checked> Direct link to an audio/video file</label>
+              <input name="url" placeholder="https://…/song.mp3 (also .wav .ogg .flac .m4a .mp4 .webm)" maxlength="2048" aria-label="File link">
+              <label><input type="radio" name="source" value="file"> From your computer</label>
+              <input type="file" name="file" accept="audio/*,video/*,.mp3,.wav,.ogg,.oga,.opus,.flac,.m4a,.aac,.mp4,.m4v,.webm,.mkv" aria-label="Audio or video file">
+              <label><input type="radio" name="source" value="library"> A track already in the library</label>
+              <select name="libraryId" aria-label="Library track"><option value="">Choose a track</option>${this.library.filter(t=>!/^https?:\/\/(www\.)?(youtube|youtu\.be|vimeo|twitch)/i.test(t.url)).map(t=>`<option value="${esc(t.id)}">${esc(t.title)}</option>`).join('')}</select>
+            </fieldset>
+            <fieldset class="fwr-convert-out"><legend>Save to the library</legend>
+              <label><input type="checkbox" name="original" checked> Full track (MP3)</label>
+              <label><input type="checkbox" name="instrumental" checked> Instrumental (vocals removed)</label>
+              <label><input type="checkbox" name="vocals"> Vocals only</label>
+              <label class="fwr-convert-row">Split strength <input type="range" name="strength" min="0.1" max="1" step="0.05" value="0.7"></label>
+              <label class="fwr-convert-row">MP3 quality <select name="kbps"><option value="128">128 kbps (small)</option><option value="192" selected>192 kbps</option><option value="256">256 kbps</option><option value="320">320 kbps (largest)</option></select></label>
+            </fieldset>
+            <input name="title" placeholder="Title (defaults to the file name)" maxlength="100" aria-label="Title">
+            <input name="category" placeholder="Category (optional)" maxlength="50" aria-label="Category">
+            <div class="fwr-convert-actions"><button type="submit" ${this.converter.busy ? 'disabled' : ''}>Convert &amp; save</button>
+              <button type="button" data-mgr="convert-cancel" ${this.converter.busy ? '' : 'hidden'}>Cancel</button></div>
+            <div class="fwr-convert-status" data-convert-status ${this.convertStatus ? '' : 'hidden'} role="status" aria-live="polite">
+              <progress max="1" value="${this.convertStatus?.fraction ?? 0}" ${this.convertStatus?.done || this.convertStatus?.error ? 'hidden' : ''}></progress>
+              <span>${esc(this.convertStatus?.text || '')}</span></div>
+            <p class="fwr-manager-note">Splitting works on stereo recordings: it removes what's mixed dead-centre in the vocal range. Links must point straight to a file and the site must allow downloads from other websites; otherwise download it and use “From your computer”. YouTube, Vimeo, Twitch and other streaming links can't be imported. Only import audio you have the right to use.</p>
+          </form>
           <h3>Encounter & event triggers <small>${this.triggers.length} rules</small></h3>
           <form data-trigger-form class="fwr-trigger-form">
             <input name="name" placeholder="Trigger name, e.g. Boss Theme" required maxlength="100" aria-label="Trigger name">
@@ -246,6 +276,7 @@ export class MusicFeatures {
     if (button.hasAttribute('data-manager-close')) {this.closeManager();return;}
     const act = button.dataset.mgr; const key = button.dataset.id;
     if (act === 'open-director') return this.watch.director.open(this.actorHint);
+    if (act === 'convert-cancel') return this.converter.cancel();
     if (act === 'browse') return this.browse(path => {const el = this.dialog?.querySelector('[name="url"]'); if (el) el.value = path;});
     const track = this.library.find(x => x.id === key);
     if (act === 'library-play' && track) return this.playLibrary(track.id,{action:'interrupt',force:true});
@@ -256,7 +287,7 @@ export class MusicFeatures {
       form.elements.url.value=track.url;form.elements.category.value=track.category||'';
       form.elements.tags.value=(track.tags||[]).join(', ');
       form.elements.fadeIn.value=String(track.fadeIn||0); form.elements.fadeOut.value=String(track.fadeOut||0);
-      form.elements.instrumental.checked=Boolean(track.instrumental);
+      form.elements.vocalMode.value=track.vocalMode || (track.instrumental?'remove':'off');
       form.elements.title.focus();return;
     }
     if (act === 'library-loop' && track) return this.saveLibrary(this.library.map(x => x.id===key ? {...x,loop:!x.loop}:x));
@@ -280,7 +311,47 @@ export class MusicFeatures {
       count += (c.steps || []).filter(st => st.action === 'track' && st.refId === trackId).length;
     return count;
   }
+  /** Show conversion progress in place, without re-rendering the whole manager. */
+  setConvertStatus(status) {
+    this.convertStatus = status;
+    const box = this.dialog?.querySelector('[data-convert-status]');
+    if (!box) return;
+    box.hidden = !status;
+    const bar = box.querySelector('progress');
+    if (bar) { bar.hidden = Boolean(status?.done || status?.error); bar.value = status?.fraction ?? 0; }
+    const text = box.querySelector('span');
+    if (text) text.textContent = status?.text || '';
+    box.classList.toggle('fwr-convert-error', Boolean(status?.error));
+    const form = this.dialog.querySelector('[data-convert-form]');
+    if (form) {
+      form.querySelector('button[type="submit"]').disabled = this.converter.busy;
+      form.querySelector('[data-mgr="convert-cancel"]').hidden = !this.converter.busy;
+    }
+  }
+
+  async convertSubmit(form) {
+    const data = new FormData(form);
+    const kind = data.get('source');
+    const source = kind === 'file' ? { file: form.elements.file.files?.[0] } : kind === 'library' ? { libraryId: data.get('libraryId') } : { url: data.get('url') };
+    if (kind === 'file' && !source.file) return this.setConvertStatus({ text: 'Choose a file first.', error: true });
+    if (kind === 'url' && isStreamingLink(source.url)) return this.setConvertStatus({ text: "YouTube, Vimeo, Twitch, Spotify and similar services don't allow downloading, so their links can't be imported. Use a file you own instead.", error: true });
+    const options = { source, title: data.get('title'), category: data.get('category'), strength: Number(data.get('strength')), kbps: Number(data.get('kbps')),
+      outputs: { original: data.get('original') === 'on', instrumental: data.get('instrumental') === 'on', vocals: data.get('vocals') === 'on' } };
+    const stageText = (stage, f) => `${stage}${f > 0 && f < 1 ? ` · ${Math.round(f * 100)}%` : '…'}`;
+    try {
+      this.setConvertStatus({ text: 'Starting…', fraction: 0 });
+      const summary = await this.converter.run(options, (stage, fraction) => this.setConvertStatus({ text: stageText(stage, fraction), fraction }));
+      const names = summary.added.map(t => `“${t.title}”`).join(', ');
+      this.setConvertStatus({ done: true, text: `${summary.added.length ? `Added ${names} to the library.` : 'Nothing was saved.'} ${summary.notes.join(' ')}`.trim() });
+      ui.notifications?.info(`Watch Room: imported ${summary.title}.`);
+    } catch (error) {
+      const text = error?.name === 'AbortError' ? 'Conversion cancelled.' : error.message;
+      this.setConvertStatus({ error: error?.name !== 'AbortError', done: true, text });
+    }
+  }
+
   async managerSubmit(event) {
+    if (event.target.matches('[data-convert-form]')) { event.preventDefault(); return this.convertSubmit(event.target); }
     if (!event.target.matches('[data-library-form],[data-trigger-form]')) return;
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.target));
@@ -292,7 +363,8 @@ export class MusicFeatures {
           tags:[...new Set((data.tags||'').split(',').map(v=>v.trim().slice(0,40)).filter(Boolean))].slice(0,12),
           loop:this.library.find(x=>x.id===data.editId)?.loop||false,
           fadeIn:Math.max(0,Math.min(MAX_FADE,Number(data.fadeIn)||0)), fadeOut:Math.max(0,Math.min(MAX_FADE,Number(data.fadeOut)||0)),
-          instrumental:data.instrumental==='on'};
+          vocalMode:['remove','isolate'].includes(data.vocalMode)?data.vocalMode:'off', instrumental:data.vocalMode==='remove',
+          ...(this.library.find(x=>x.id===data.editId)?.stems ? {stems:this.library.find(x=>x.id===data.editId).stems} : {})};
         await this.saveLibrary(data.editId ? this.library.map(x=>x.id===data.editId?entry:x) : [...this.library,entry]);
       } else {
         if (!this.library.some(x=>x.id===data.libraryId)) throw new Error('Select a saved track first.');

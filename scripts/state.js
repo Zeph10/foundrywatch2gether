@@ -125,14 +125,25 @@ export function supportsInstrumental(entry) {
 }
 
 /** The fx a saved library track carries into the room. */
-export const trackFx = track => ({ fadeIn: track?.fadeIn || 0, fadeOut: track?.fadeOut || 0, instrumental: Boolean(track?.instrumental) });
+export const trackFx = track => ({ fadeIn: track?.fadeIn || 0, fadeOut: track?.fadeOut || 0, instrumental: Boolean(track?.instrumental),
+  vocalMode: track?.vocalMode, vocalStrength: track?.vocalStrength });
 
-/** Per-track audio effects: fade-in/out seconds and the instrumental (vocal-reduction) switch. */
+export const VOCAL_MODE_LABELS = Object.freeze({ off: "Original", remove: "Remove vocals (instrumental)", isolate: "Vocals only" });
+
+/**
+ * Per-track audio effects: fade-in/out seconds and the vocal splitter (`vocalMode`: off / remove /
+ * isolate, with `vocalStrength` 0.1–1). `instrumental` is kept as a derived flag for older data/macros.
+ */
 export function cleanFx(fx = {}, entry = {}) {
+  let vocalMode = ["off", "remove", "isolate"].includes(fx.vocalMode) ? fx.vocalMode : (fx.instrumental ? "remove" : "off");
+  if (!supportsInstrumental(entry)) vocalMode = "off";
+  const strength = Number(fx.vocalStrength);
   return {
     fadeIn: fadeSeconds(fx.fadeIn),
     fadeOut: fadeSeconds(fx.fadeOut),
-    instrumental: Boolean(fx.instrumental) && supportsInstrumental(entry)
+    vocalMode,
+    vocalStrength: Number.isFinite(strength) ? Math.round(Math.max(0.1, Math.min(1, strength)) * 20) / 20 : 0.7,
+    instrumental: vocalMode === "remove"
   };
 }
 
@@ -331,7 +342,7 @@ export function reduceIntent(previous, intent, actor, users, minimumRole, now) {
         if (!entry || !EXTERNAL_PROVIDERS.has(entry.provider)) return null;
         if (Boolean(entry.external) === Boolean(intent.external)) return null;
         entry.external = Boolean(intent.external);
-        entry.instrumental = Boolean(entry.instrumental) && supportsInstrumental(entry);
+        if (!supportsInstrumental(entry)) Object.assign(entry, { instrumental: false, vocalMode: "off" });
         break;
       }
       case "SHARE_START": {
@@ -380,8 +391,12 @@ export function reduceIntent(previous, intent, actor, users, minimumRole, now) {
         if (!host) return null;
         const entry = [s.current, ...s.queue].find(e => e?.uid === intent.uid);
         if (!entry) return null;
-        const next = cleanFx({ ...entry, ...intent.fx }, entry);
-        if (["fadeIn", "fadeOut", "instrumental"].every(k => next[k] === (entry[k] ?? (k === "instrumental" ? false : 0)))) return null;
+        // An explicit instrumental:true/false from older callers maps onto vocalMode.
+        const fx = { ...intent.fx };
+        if (fx.instrumental !== undefined && fx.vocalMode === undefined) fx.vocalMode = fx.instrumental ? "remove" : "off";
+        const before = cleanFx(entry, entry);
+        const next = cleanFx({ ...before, ...fx }, entry);
+        if (Object.keys(next).every(k => next[k] === before[k])) return null;
         Object.assign(entry, next);
         break;
       }

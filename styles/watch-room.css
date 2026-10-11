@@ -330,3 +330,26 @@
 #fwr-join-prompt button:focus-visible { outline:2px solid #ebca81; outline-offset:2px; }
 #fwr-room .fwr-fx-fades label { white-space:nowrap; flex:1 1 0; min-width:0; }
 #fwr-room .fwr-fx-fades input { flex:0 1 52px; width:52px; }
+/* v1.6 — vocal splitter controls */
+#fwr-room .fwr-fx-row { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--fwr-muted); }
+#fwr-room .fwr-fx-row select { flex:1; min-width:0; height:auto; padding:4px 5px; background:#181817; color:#eee8dd; border:1px solid #5e5340; border-radius:3px; font:inherit; }
+#fwr-room .fwr-fx-strength input { flex:1; min-width:0; }
+#fwr-room .fwr-fx-strength output { width:34px; text-align:right; font-variant-numeric:tabular-nums; color:#e7d3a8; font-size:11px; }
+/* v1.6 — import & convert */
+#fwr-manager .fwr-convert { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-bottom:14px; }
+#fwr-manager .fwr-convert fieldset { border:1px solid #534832; border-radius:4px; padding:8px; margin:0; display:flex; flex-direction:column; gap:5px; min-width:0; }
+#fwr-manager .fwr-convert legend { color:#e2bf7d; font-size:12px; padding:0 4px; }
+#fwr-manager .fwr-convert label { display:flex; align-items:center; gap:6px; color:#cbb994; font-size:12px; }
+#fwr-manager .fwr-convert label input[type="radio"], #fwr-manager .fwr-convert label input[type="checkbox"] { width:auto; }
+#fwr-manager .fwr-convert-row input[type="range"] { flex:1; padding:0; }
+#fwr-manager .fwr-convert-row select { flex:1; }
+#fwr-manager .fwr-convert-actions { display:flex; gap:6px; align-items:center; }
+#fwr-manager .fwr-convert-actions button[type="submit"] { background:#524021; border-color:#d7b56e; }
+#fwr-manager .fwr-convert-status { grid-column:1 / -1; display:flex; flex-direction:column; gap:4px; color:#e7d3a8; font-size:12px; }
+#fwr-manager .fwr-convert-status progress { width:100%; height:8px; accent-color:#d7b56e; }
+#fwr-manager .fwr-convert-status.fwr-convert-error { color:#ffb8a9; }
+#fwr-manager .fwr-convert .fwr-manager-note { grid-column:1 / -1; margin:0; }
+@media (max-width:620px) { #fwr-manager .fwr-convert { grid-template-columns:1fr; } }
+/* Button resets above set display:inline-flex, which would otherwise override the hidden attribute. */
+#fwr-manager [hidden], #fwr-director [hidden] { display:none !important; }
+#fwr-manager input[type="range"] { accent-color:#c5a362; }

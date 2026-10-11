@@ -1,5 +1,5 @@
 /** Thin wrappers around each provider's official playback API. */
-import { VocalReducer, resumeAudio, isCrossOrigin, allowsAudioProcessing } from "./audio-fx.js";
+import { VocalSplitter, resumeAudio, isCrossOrigin, allowsAudioProcessing } from "./audio-fx.js";
 const sdkCache = new Map();
 function loadSDK(key, src, check) {
   if (check()) return Promise.resolve();
@@ -165,14 +165,14 @@ export async function createAdapter(entry, mount, onStatus, context = {}) {
     // Instrumental mode reads the raw audio via Web Audio. Files from other sites only allow that
     // with CORS, and asking for CORS from a server that doesn't send it would break playback, so check first.
     let canProcess = !isCrossOrigin(entry.url);
-    if (!canProcess && entry.instrumental) {
+    if (!canProcess && entry.vocalMode && entry.vocalMode !== "off") {
       canProcess = await allowsAudioProcessing(entry.url);
       if (canProcess) video.crossOrigin = "anonymous";
       if (stale()) { holder.remove(); return null; }
     }
     video.src = entry.url;
     holder.append(video);
-    let reducer = null;
+    let splitter = null, splitterLoad = null;
     let volume = 1;
     return {
       kind: "file", live: false, element: video, ready,
@@ -184,23 +184,25 @@ export async function createAdapter(entry, mount, onStatus, context = {}) {
       getDuration: () => finite(video.duration),
       setVolume: v => {
         volume = v;
-        if (reducer) { reducer.setVolume(v); video.muted = false; }
+        if (splitter) { splitter.setVolume(v); video.muted = false; }
         else { video.volume = v; video.muted = v === 0; }
       },
       instrumentalSupported: () => canProcess,
-      /** Turn vocal reduction on/off. Resolves {ok, reason?}. */
-      async setInstrumental(on) {
-        if (!on && !reducer) return { ok: true };
-        if (!canProcess) return { ok: false, reason: "This file's server doesn't allow audio processing (no CORS), so vocals can't be reduced. Upload the file to Foundry instead." };
+      /** Vocal splitter: mode "off" | "remove" | "isolate", strength 0.1–1. Resolves {ok, blocked?, reason?}. */
+      async setVocals({ mode = "off", strength = 0.7 } = {}) {
+        if (mode === "off" && !splitter && !splitterLoad) return { ok: true };
+        if (!canProcess) return { ok: false, reason: "This file's server doesn't allow audio processing (no CORS), so vocals can't be split. Import it to the library (Music & Triggers → Import & convert) or upload it to Foundry instead." };
         try {
-          if (!reducer) { reducer = new VocalReducer(video); reducer.setVolume(volume); }
-          reducer.setEnabled(on);
+          // One splitter per element: createMediaElementSource can only be called once.
+          splitterLoad ||= VocalSplitter.create(video).then(created => { splitter = created; splitter.setVolume(volume); return created; });
+          const result = (await splitterLoad).setMode(mode, strength);
+          if (!result.ok) return result;
           const running = await resumeAudio();
-          return running ? { ok: true } : { ok: false, blocked: true, reason: "Click “enable playback” to start instrumental mode." };
+          return running ? { ok: true } : { ok: false, blocked: true, reason: "Click “enable playback” to start the vocal splitter." };
         } catch (error) { return { ok: false, reason: error.message }; }
       },
-      /** Side/mid energy ratio while playing (null = couldn't tell). */
-      measureStereo: () => reducer ? reducer.measureStereo() : Promise.resolve(null),
+      /** Centre similarity of the vocal band while playing (≈1 means mono; null = couldn't tell). */
+      measureCentre: () => splitter ? splitter.measureCentre() : Promise.resolve(null),
       async pip() { if (document.pictureInPictureEnabled && video.requestPictureInPicture) await video.requestPictureInPicture(); },
       destroy() { destroyed = true; video.pause(); video.removeAttribute("src"); video.load(); holder.remove(); }
     };

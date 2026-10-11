@@ -1,4 +1,5 @@
-import { MODULE_ID, MAX_QUEUE, MAX_FADE, initialState, expectedPosition, canControl, reduceWithAutoOpen, serverNow, parseSource, fadeGain, supportsInstrumental, trackFx } from "./state.js";
+import { MODULE_ID, MAX_QUEUE, MAX_FADE, initialState, expectedPosition, canControl, reduceWithAutoOpen, serverNow, parseSource, fadeGain, supportsInstrumental, trackFx, VOCAL_MODE_LABELS } from "./state.js";
+import { MONO_SIMILARITY } from "./separation.js";
 import { audioContext, resumeAudio, isCrossOrigin, instrumentalSearchUrl } from "./audio-fx.js";
 import { createAdapter, checkEmbeddable } from "./providers.js";
 import { ScreenShare } from "./streams.js";
@@ -20,9 +21,10 @@ const DRIFT_FORCED = 0.75;
 /** Intents whose rejection is an expected race and shouldn't be reported to the user. */
 const QUIET_REJECTIONS = new Set(["ENDED", "NEXT", "VOTE_TIMEOUT"]);
 /** Identifies the player a room entry needs: switching a video to/from pop-ups keeps its uid but needs a rebuild. */
-// Cross-origin files must be reloaded with CORS to switch on instrumental mode, so that's part of the key too.
+const vocalsOn = entry => Boolean(entry?.vocalMode && entry.vocalMode !== "off") || Boolean(entry?.instrumental);
+// Cross-origin files must be reloaded with CORS to use the vocal splitter, so that's part of the key too.
 const playerKey = entry => entry ? `${entry.uid}${entry.external ? ":external" : ""}${
-  entry.instrumental && entry.provider === "file" && isCrossOrigin(entry.url) ? ":fx" : ""}` : null;
+  vocalsOn(entry) && entry.provider === "file" && isCrossOrigin(entry.url) ? ":fx" : ""}` : null;
 /** Seconds used by the "Fade out" buttons when the track has no fade-out of its own. */
 const DEFAULT_MANUAL_FADE = 4;
 const LOOP_LABELS = { off: "Repeat: off", one: "Repeat: current track", queue: "Repeat: whole queue" };
@@ -281,7 +283,7 @@ class WatchRoom {
         const playbackChanged = !prior.open || prior.playing !== s.playing || prior.position !== s.position ||
           prior.startedAt !== s.startedAt;
         this.reconcile(playbackChanged).catch(console.error);
-        if (Boolean(prior.current?.instrumental) !== Boolean(s.current?.instrumental)) this.applyInstrumental();
+        if ((prior.current?.vocalMode || "off") !== (s.current?.vocalMode || "off") || prior.current?.vocalStrength !== s.current?.vocalStrength) this.applyVocals();
         this.applyVolume(true);
       }
     }
@@ -384,7 +386,8 @@ class WatchRoom {
           </div>
           <div class="fwr-fx" data-fx>
             <div class="fwr-section-heading"><strong>Track sound</strong><small data-fx-scope>Applies for everyone</small></div>
-            <label class="fwr-fx-check"><input type="checkbox" data-fx-instrumental> Instrumental (reduce vocals)</label>
+            <label class="fwr-fx-row">Vocals <select data-fx-vocals>${Object.entries(VOCAL_MODE_LABELS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select></label>
+            <label class="fwr-fx-row fwr-fx-strength" data-fx-strength-row>Strength <input type="range" data-fx-strength min="0.1" max="1" step="0.05"><output data-fx-strength-out></output></label>
             <small class="fwr-fx-note" data-fx-note></small>
             <button type="button" class="fwr-fx-link" data-act="find-instrumental" hidden>${icon("fa-magnifying-glass")} Find an instrumental version on YouTube</button>
             <div class="fwr-fx-fades">
@@ -419,11 +422,17 @@ class WatchRoom {
     q(root, "[data-add-form]").addEventListener("submit", event => this.onAdd(event));
     q(root, "[data-independent]").addEventListener("change", event => this.setIndependent(event.target.checked));
     q(root, '[data-vote-mode]').addEventListener('change', e => this.issue('VOTE_MODE',{enabled:e.target.checked}));
-    q(root, "[data-fx-instrumental]").addEventListener("change", event => {
-      // This change is a click, so it's the moment to unlock Web Audio for this browser.
+    q(root, "[data-fx-vocals]").addEventListener("change", event => {
+      // This change is a user action, so it's the moment to unlock Web Audio for this browser.
       audioContext(); resumeAudio();
       const current = this.state.current;
-      if (current) this.issue("TRACK_FX", { uid: current.uid, fx: { instrumental: event.target.checked } });
+      if (current) this.issue("TRACK_FX", { uid: current.uid, fx: { vocalMode: event.target.value } });
+    });
+    const strength = q(root, "[data-fx-strength]");
+    strength.addEventListener("input", event => { q(root, "[data-fx-strength-out]").textContent = `${Math.round(Number(event.target.value) * 100)}%`; });
+    strength.addEventListener("change", event => {
+      const current = this.state.current;
+      if (current) this.issue("TRACK_FX", { uid: current.uid, fx: { vocalStrength: Number(event.target.value) } });
     });
     root.querySelectorAll("[data-fx-fade]").forEach(input => input.addEventListener("change", event => {
       const current = this.state.current;
@@ -516,7 +525,8 @@ class WatchRoom {
     q(el, '.fwr-media').classList.toggle('fwr-audio',Boolean(s.current?.audio));
     q(el, '[data-act="compact"]').title = this.compact ? 'Expand player' : 'Compact thumbnail player';
     q(el, '[data-act="compact"]').innerHTML = this.compact ? icon('fa-up-right-and-down-left-from-center') : icon('fa-down-left-and-up-right-to-center');
-    q(el, "[data-title]").textContent = `${s.current?.title || "No video selected"}${s.current?.instrumental ? " · instrumental" : ""}`;
+    const vocalTag = { remove: " · instrumental", isolate: " · vocals only" }[s.current?.vocalMode] || (s.current?.instrumental ? " · instrumental" : "");
+    q(el, "[data-title]").textContent = `${s.current?.title || "No video selected"}${vocalTag}`;
     this.paintFallback();
     this.paintFx();
     this.paintListeners();
@@ -959,7 +969,7 @@ class WatchRoom {
       if (generation !== this.loadGeneration || this.hidden) return;
       this.applyVolume(true);
       if (this.playerErrorUid !== entry.uid) this.setMessage("");
-      if (entry.instrumental) this.applyInstrumental();
+      if (vocalsOn(entry)) this.applyVocals();
       await this.reconcile(true);
       this.probeAutoplay(entry.uid);
     } catch (error) {
@@ -1024,10 +1034,11 @@ class WatchRoom {
   }
 
   /** Switch the current file's vocal reduction to match the room, and warn when it can't work well. */
-  async applyInstrumental() {
+  async applyVocals() {
     const adapter = this.adapter, entry = this.state.current;
-    if (!adapter?.setInstrumental || !entry) return;
-    const result = await adapter.setInstrumental(Boolean(entry.instrumental));
+    if (!adapter?.setVocals || !entry) return;
+    const mode = entry.vocalMode || (entry.instrumental ? "remove" : "off");
+    const result = await adapter.setVocals({ mode, strength: entry.vocalStrength ?? 0.7 });
     if (adapter !== this.adapter) return;
     this.applyVolume(true);
     if (!result.ok) {
@@ -1035,14 +1046,14 @@ class WatchRoom {
       this.setMessage(result.reason, true);
       return;
     }
-    if (!entry.instrumental || this.stereoCheckedFor === entry.uid) return;
+    if (mode === "off" || this.stereoCheckedFor === entry.uid) return;
     this.stereoCheckedFor = entry.uid;
     // Mono recordings have no stereo difference to work with; tell people instead of leaving them puzzled.
     const waitForSound = async () => { for (let i = 0; i < 40 && !this.observedPlaying; i++) await new Promise(r => setTimeout(r, 250)); };
     await waitForSound();
-    const ratio = await adapter.measureStereo?.();
-    if (adapter !== this.adapter || ratio === null || ratio === undefined) return;
-    if (ratio < 0.04) this.setMessage("This recording is mono, so instrumental mode can't separate the vocals and leaves mostly bass. Use an instrumental version of the track instead.", true);
+    const similarity = await adapter.measureCentre?.();
+    if (adapter !== this.adapter || similarity === null || similarity === undefined) return;
+    if (similarity >= MONO_SIMILARITY) this.setMessage("This recording is mono (or nearly), so the vocal splitter can't tell the voice from the music. Use an instrumental version of the track instead.", true);
   }
 
   /** "Who's listening" panel and the header count. */
@@ -1139,13 +1150,19 @@ class WatchRoom {
     panel.hidden = !this.canControl || !entry || entry.provider === "stream";
     if (panel.hidden) return;
     const supported = supportsInstrumental(entry);
-    const box = q(panel, "[data-fx-instrumental]");
-    box.checked = Boolean(entry.instrumental);
-    box.disabled = !supported;
-    q(panel, "[data-fx-note]").textContent = supported
-      ? "Removes centre-panned vocals from stereo mixes. Works best on studio tracks; it can't help with mono recordings."
-      : entry.external ? "Not available for pop-up videos."
-      : "Only for audio/video files (uploads or direct links). YouTube, Vimeo and Twitch don't give access to their audio.";
+    const mode = entry.vocalMode || (entry.instrumental ? "remove" : "off");
+    const select = q(panel, "[data-fx-vocals]");
+    if (document.activeElement !== select) select.value = mode;
+    select.disabled = !supported;
+    const strength = q(panel, "[data-fx-strength]");
+    q(panel, "[data-fx-strength-row]").hidden = !supported || mode === "off";
+    if (document.activeElement !== strength) strength.value = String(entry.vocalStrength ?? 0.7);
+    q(panel, "[data-fx-strength-out]").textContent = `${Math.round(Number(strength.value) * 100)}%`;
+    q(panel, "[data-fx-note]").textContent = !supported
+      ? (entry.external ? "Not available for pop-up videos."
+        : "Only for audio/video files (uploads or direct links). YouTube, Vimeo and Twitch don't give access to their audio.")
+      : mode === "off" ? "Splits the voice from the music in stereo recordings, live for everyone."
+      : "Removes what's mixed dead-centre in the vocal range. Higher strength removes more but can sound watery; centred instruments (snare, solos) are affected too.";
     q(panel, '[data-act="find-instrumental"]').hidden = supported || !["youtube", "vimeo", "twitch"].includes(entry.provider);
     for (const input of panel.querySelectorAll("[data-fx-fade]")) {
       if (document.activeElement !== input) input.value = String(Number(entry[input.dataset.fxFade]) || 0);
