@@ -7,7 +7,8 @@ export function initialState() {
   return {
     revision: 0, roomId: null, open: false, hostId: null,
     controllerIds: [], current: null, queue: [], playing: false,
-    position: 0, startedAt: 0, scene: null, loopMode: "off", voteMode: false, pendingVote: null, resumeStack: [], currentPriority: 0, cinematic: null, cinematicFocus: false
+    position: 0, startedAt: 0, scene: null, loopMode: "off", voteMode: false, pendingVote: null, resumeStack: [], currentPriority: 0, cinematic: null, cinematicFocus: false,
+    fade: null, fadeInStart: 0, resumeFadeIn: 0
   };
 }
 
@@ -109,9 +110,53 @@ export function parseSource(input, base = globalThis.location?.href || "https://
   throw new Error("Supported: YouTube, Vimeo, Twitch, MP4/WebM video, MP3/OGG/WAV/M4A/FLAC/AAC/Opus audio.");
 }
 
-export function makeEntry(data, title, loop = false) {
+export function makeEntry(data, title, loop = false, fx = {}) {
   const parsed = parseSource(data.url);
-  return { ...parsed, title: cleanTitle(title, parsed.label), loop: Boolean(loop), uid: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}` };
+  return { ...parsed, title: cleanTitle(title, parsed.label), loop: Boolean(loop), ...cleanFx(fx, parsed),
+    uid: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}` };
+}
+
+export const MAX_FADE = 60;
+const fadeSeconds = v => Number.isFinite(Number(v)) ? Math.round(Math.max(0, Math.min(MAX_FADE, Number(v))) * 10) / 10 : 0;
+
+/** Vocal reduction runs through Web Audio, which needs the raw audio: only direct files qualify. */
+export function supportsInstrumental(entry) {
+  return entry?.provider === "file" && !entry.external;
+}
+
+/** The fx a saved library track carries into the room. */
+export const trackFx = track => ({ fadeIn: track?.fadeIn || 0, fadeOut: track?.fadeOut || 0, instrumental: Boolean(track?.instrumental) });
+
+/** Per-track audio effects: fade-in/out seconds and the instrumental (vocal-reduction) switch. */
+export function cleanFx(fx = {}, entry = {}) {
+  return {
+    fadeIn: fadeSeconds(fx.fadeIn),
+    fadeOut: fadeSeconds(fx.fadeOut),
+    instrumental: Boolean(fx.instrumental) && supportsInstrumental(entry)
+  };
+}
+
+const clamp01 = v => Math.max(0, Math.min(1, v));
+/**
+ * Volume multiplier (0–1) for the current track at `now`, computed from the shared room clock so
+ * every client fades in step. Combines the track's fade-in (from when it started or resumed), its
+ * fade-out before a known end, and a GM's manual "fade out" in progress.
+ */
+export function fadeGain(s, now = serverNow(), duration = 0) {
+  const entry = s?.current;
+  if (!entry) return 1;
+  let gain = 1;
+  const pos = expectedPosition(s, now);
+  // A track paused by "fade out & pause" fades back in over the same time when resumed.
+  const fadeIn = Math.max(Number(entry.fadeIn) || 0, Number(s.resumeFadeIn) || 0);
+  const from = Number(s.fadeInStart);
+  if (fadeIn > 0 && !entry.live && Number.isFinite(from) && from >= 0) gain = Math.min(gain, clamp01((pos - from) / fadeIn));
+  const fadeOut = Number(entry.fadeOut) || 0;
+  const loops = entry.loop || s.loopMode === "one";
+  if (fadeOut > 0 && duration > 0 && !entry.live && !loops) gain = Math.min(gain, clamp01((duration - pos) / fadeOut));
+  const fade = s.fade;
+  if (fade && fade.uid === entry.uid && fade.ms > 0) gain = Math.min(gain, clamp01(1 - (now - fade.startedAt) / fade.ms));
+  return gain;
 }
 
 /** Providers that can be watched on their own site in a synced pop-up instead of being embedded. */
@@ -140,23 +185,29 @@ const copy = obj => JSON.parse(JSON.stringify(obj));
 /** Make `entry` the current video, starting at its link's start time. */
 function setCurrent(s, entry, now, playing) {
   s.pendingVote = null;
+  s.fade = null;
+  s.resumeFadeIn = 0;
   s.current = entry || null;
   s.currentPriority = Number.isFinite(Number(entry?.priority)) ? Math.max(0, Math.min(100, Number(entry.priority))) : 0;
   s.position = entry && !entry.live ? validPos(entry.start) : 0;
   s.startedAt = now;
   s.playing = Boolean(entry) && playing;
+  s.fadeInStart = s.position; // fade in from where this track starts
 }
 
 /** Progress to next track, with single-track, full-queue and encounter resume semantics. */
 function advance(s, now, natural = false) {
   const old = s.current;
   if (natural && old && !old.live && (old.loop || s.loopMode === "one")) {
-    setCurrent(s, { ...old }, now, true); return;
+    setCurrent(s, { ...old }, now, true);
+    s.fadeInStart = -1; // a looping track shouldn't fade in again on every repeat
+    return;
   }
   if (s.resumeStack?.length) {
     const resume = s.resumeStack.pop();
     setCurrent(s, resume.entry, now, resume.playing);
     s.position = resume.position;
+    s.fadeInStart = resume.position;
     return;
   }
   if (old && s.loopMode === "queue" && !old.live && s.queue.length < MAX_QUEUE) {
@@ -230,7 +281,7 @@ export function reduceIntent(previous, intent, actor, users, minimumRole, now) {
       case "ADD": {
         if (!host) return null;
         let entry;
-        try { entry = makeEntry({url: intent.url}, intent.title, intent.loop); } catch { return null; }
+        try { entry = makeEntry({url: intent.url}, intent.title, intent.loop, intent.fx); } catch { return null; }
         if (intent.external && EXTERNAL_PROVIDERS.has(entry.provider)) entry.external = true;
         if (!s.current) setCurrent(s, entry, now, false);
         else if (s.queue.length < MAX_QUEUE) s.queue.push(entry);
@@ -280,6 +331,7 @@ export function reduceIntent(previous, intent, actor, users, minimumRole, now) {
         if (!entry || !EXTERNAL_PROVIDERS.has(entry.provider)) return null;
         if (Boolean(entry.external) === Boolean(intent.external)) return null;
         entry.external = Boolean(intent.external);
+        entry.instrumental = Boolean(entry.instrumental) && supportsInstrumental(entry);
         break;
       }
       case "SHARE_START": {
@@ -306,18 +358,53 @@ export function reduceIntent(previous, intent, actor, users, minimumRole, now) {
         if (!host || !s.current || s.playing) return null;
         s.playing = true;
         s.startedAt = now;
+        s.fadeInStart = s.position; // tracks with a fade-in also fade back in after a pause
+        s.fade = null;
         break;
       case "PAUSE":
         if (!host || !s.current || !s.playing) return null;
         s.position = expectedPosition(s, now);
         s.playing = false;
         s.startedAt = now;
+        s.fade = null;
+        s.resumeFadeIn = 0;
         break;
       case "SEEK":
         if (!host || !s.current || s.current.live) return null;
         s.position = validPos(intent.position);
         s.startedAt = now;
+        s.fadeInStart = -1;
         break;
+      case "TRACK_FX": {
+        // Change a queued or current track's fades / instrumental switch.
+        if (!host) return null;
+        const entry = [s.current, ...s.queue].find(e => e?.uid === intent.uid);
+        if (!entry) return null;
+        const next = cleanFx({ ...entry, ...intent.fx }, entry);
+        if (["fadeIn", "fadeOut", "instrumental"].every(k => next[k] === (entry[k] ?? (k === "instrumental" ? false : 0)))) return null;
+        Object.assign(entry, next);
+        break;
+      }
+      case "FADE": {
+        // GM/controller "fade out" button: every client ramps down over `ms`, then the leader applies `then`.
+        if (!host || !s.current || !s.playing) return null;
+        const ms = Math.round(Math.max(500, Math.min(MAX_FADE * 1000, Number(intent.ms) || 3000)));
+        const then = ["pause", "next", "stop"].includes(intent.then) ? intent.then : "pause";
+        s.fade = { uid: s.current.uid, startedAt: now, ms, then };
+        break;
+      }
+      case "FADE_DONE": {
+        const fade = s.fade;
+        if (!host || !fade || fade.uid !== s.current?.uid || now < fade.startedAt + fade.ms - 250) return null;
+        s.fade = null;
+        if (fade.then === "next") advance(s, now);
+        else if (fade.then === "stop") { s.resumeStack = []; setCurrent(s, null, now, false); }
+        else if (s.playing) {
+          s.position = expectedPosition(s, now); s.playing = false; s.startedAt = now;
+          s.resumeFadeIn = Math.round(fade.ms / 100) / 10;
+        }
+        break;
+      }
       case "LOOP_MODE":
         if (!host || !["off", "one", "queue"].includes(intent.mode)) return null;
         s.loopMode = intent.mode; break;
@@ -375,7 +462,7 @@ export function reduceIntent(previous, intent, actor, users, minimumRole, now) {
       case "TRIGGER": {
         if (!actor.isGM) return null; // authoritative hooks/GM macros only
         let entry;
-        try { entry = makeEntry({url: intent.url}, intent.title, intent.loop); } catch { return null; }
+        try { entry = makeEntry({url: intent.url}, intent.title, intent.loop, intent.fx); } catch { return null; }
         const p = Math.min(100, Math.max(0, Number.isFinite(Number(intent.priority)) ? Number(intent.priority) : 50));
         entry.priority = p;
         if (intent.action === 'interrupt' && !intent.force && p < (Number(s.currentPriority) || 0)) return null;

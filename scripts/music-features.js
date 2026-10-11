@@ -1,4 +1,4 @@
-import { MODULE_ID, parseSource } from './state.js';
+import { MODULE_ID, parseSource, trackFx, MAX_FADE } from './state.js';
 import { raise, closeOnEscape, preserveScroll, confirmDialog } from './ui.js';
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const id = () => globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -105,7 +105,7 @@ export class MusicFeatures {
   run(rule) {
     const track = this.library.find(x => x.id === rule.libraryId);
     if (!track) return false;
-    this.watch.issue('TRIGGER', {url:track.url, title:track.title, loop:track.loop,
+    this.watch.issue('TRIGGER', {url:track.url, title:track.title, loop:track.loop, fx:trackFx(track),
       action:rule.action === 'queue' ? 'queue':'interrupt', resume:Boolean(rule.resume),priority:Number(rule.priority ?? 50),quiet:true});
     return true;
   }
@@ -190,12 +190,15 @@ export class MusicFeatures {
             <input name="url" placeholder="Server audio path or direct audio URL" maxlength="2048" required aria-label="Audio URL">
             <input name="category" placeholder="Category, e.g. Boss" maxlength="50">
             <input name="tags" placeholder="Tags, comma-separated" maxlength="200">
+            <label class="fwr-manager-inline">Fade in <input name="fadeIn" type="number" min="0" max="${MAX_FADE}" step="0.5" value="0"> s</label>
+            <label class="fwr-manager-inline">Fade out <input name="fadeOut" type="number" min="0" max="${MAX_FADE}" step="0.5" value="0"> s</label>
+            <label class="fwr-manager-inline fwr-manager-check" title="Reduce centre-panned vocals. Audio/video files only (uploads or direct links), stereo mixes only."><input type="checkbox" name="instrumental"> Instrumental (reduce vocals)</label>
             <button type="button" data-mgr="browse">Browse server</button><button type="submit">Save / update track</button>
           </form>
           <label class="fwr-upload">Upload audio (MP3 / OGG / WAV / M4A / FLAC / AAC / OPUS)
             <input type="file" data-upload accept=".mp3,.ogg,.opus,.wav,.m4a,.aac,.flac,audio/*"></label>
           <div class="fwr-manager-list">${this.library.map(track => `<div class="fwr-manager-item" data-library-item data-search="${esc(`${track.title} ${track.category || ''} ${(track.tags || []).join(' ')}`.toLowerCase())}">
-            <span title="${esc(track.url)}">${esc(track.title)} <small>${esc(track.category||'')} ${esc((track.tags||[]).join(', '))}</small> ${track.loop ? '<small>↻ loop</small>':''}</span>
+            <span title="${esc(track.url)}">${esc(track.title)} <small>${esc(track.category||'')} ${esc((track.tags||[]).join(', '))}</small> ${track.loop ? '<small>↻ loop</small>':''}${track.instrumental ? '<small>♪ instrumental</small>':''}${(track.fadeIn||track.fadeOut) ? `<small>fade ${esc(track.fadeIn||0)}s / ${esc(track.fadeOut||0)}s</small>`:''}</span>
             <button type="button" data-mgr="library-play" data-id="${esc(track.id)}" title="Play immediately">▶</button>
             <button type="button" data-mgr="library-queue" data-id="${esc(track.id)}" title="Queue">+</button>
             <button type="button" data-mgr="library-edit" data-id="${esc(track.id)}" title="Edit track title, category and tags">Edit</button>
@@ -251,7 +254,10 @@ export class MusicFeatures {
       const form=this.dialog?.querySelector('[data-library-form]'); if(!form) return;
       form.elements.editId.value=track.id;form.elements.title.value=track.title;
       form.elements.url.value=track.url;form.elements.category.value=track.category||'';
-      form.elements.tags.value=(track.tags||[]).join(', '); form.elements.title.focus();return;
+      form.elements.tags.value=(track.tags||[]).join(', ');
+      form.elements.fadeIn.value=String(track.fadeIn||0); form.elements.fadeOut.value=String(track.fadeOut||0);
+      form.elements.instrumental.checked=Boolean(track.instrumental);
+      form.elements.title.focus();return;
     }
     if (act === 'library-loop' && track) return this.saveLibrary(this.library.map(x => x.id===key ? {...x,loop:!x.loop}:x));
     if (act === 'library-delete' && track) {
@@ -284,7 +290,9 @@ export class MusicFeatures {
         const entry = {id:data.editId || id(),title:data.title.trim().slice(0,120),url:data.url.trim(),
           category:(data.category||'').trim().slice(0,50),
           tags:[...new Set((data.tags||'').split(',').map(v=>v.trim().slice(0,40)).filter(Boolean))].slice(0,12),
-          loop:this.library.find(x=>x.id===data.editId)?.loop||false};
+          loop:this.library.find(x=>x.id===data.editId)?.loop||false,
+          fadeIn:Math.max(0,Math.min(MAX_FADE,Number(data.fadeIn)||0)), fadeOut:Math.max(0,Math.min(MAX_FADE,Number(data.fadeOut)||0)),
+          instrumental:data.instrumental==='on'};
         await this.saveLibrary(data.editId ? this.library.map(x=>x.id===data.editId?entry:x) : [...this.library,entry]);
       } else {
         if (!this.library.some(x=>x.id===data.libraryId)) throw new Error('Select a saved track first.');

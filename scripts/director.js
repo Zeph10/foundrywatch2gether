@@ -1,6 +1,7 @@
-import { MODULE_ID, serverNow } from './state.js';
+import { MODULE_ID, serverNow, trackFx } from './state.js';
 import { raise, closeOnEscape, preserveScroll, confirmDialog } from './ui.js';
-import { uid, escapeHtml as e, cleanString, hpPercent, crossedPhases, actorMatches, profileMatches, dynamicMatches, dueSteps, priority } from './director-core.js';
+import { uid, escapeHtml as e, cleanString, hpPercent, crossedPhases, actorMatches, profileMatches, dynamicMatches, dueSteps, priority,
+  THRESHOLD_SOURCES, isPercentSource, combatMetrics, crossedCombatRules, describeThreshold } from './director-core.js';
 const SOCKET = `module.${MODULE_ID}`;
 const EVENTS = {
   combatStart:'Combat begins', combatEnd:'Combat ends', initiative:'Initiative rolled', turnStart:'Creature turn begins',
@@ -18,7 +19,7 @@ export class Director {
   constructor(watch) {
     this.watch=watch; this.dialog=null; this.profileId=''; this.cueId=''; this.actorHint='';
     this.previousHP=new Map(); this.phaseFired=new Set(); this.dynamicFired=new Set(); this.timelineFired=new Set();
-    this.currentTimeline=''; this.timer=null;
+    this.currentTimeline=''; this.timer=null; this.lastMetrics=new Map();
   }
   get profiles() { return game.settings.get(MODULE_ID,'encounterProfiles') || []; }
   get cues() { return game.settings.get(MODULE_ID,'cinematicCues') || []; }
@@ -28,7 +29,9 @@ export class Director {
   start() {
     for(const a of game.actors?.contents || []) this.remember(a);
     for(const combat of game.combats || []) for(const c of combat.combatants || []) this.remember(c.actor);
-    Hooks.on('createCombatant', c => this.remember(c.actor));
+    Hooks.on('createCombatant', c => { this.remember(c.actor); if(this.watch.isLeader) this.evaluateCombat(c.parent); });
+    Hooks.on('deleteCombatant', c => { if(this.watch.isLeader) this.evaluateCombat(c.parent); });
+    for(const combat of game.combats || []) if(combat.started) this.lastMetrics.set(combat.id,combatMetrics(this.combatEntries(combat)));
     Hooks.on('updateToken',(token,changes) => {
       if (!this.watch.isLeader || !token?.actor) return;
       if (changes.delta?.system?.attributes?.hp?.value !== undefined || changes.actorData?.system?.attributes?.hp?.value !== undefined)
@@ -41,6 +44,7 @@ export class Director {
     Hooks.on('updateCombat',(combat, changes) => {
       if (!this.watch.isLeader) return;
       const ctx={combat,sceneId:combat.scene?.id || game.scenes?.active?.id};
+      if (Object.hasOwn(changes,'round') || Object.hasOwn(changes,'started')) this.evaluateCombat(combat);
       if (Object.hasOwn(changes,'round') && combat.round >= 1) {
         this.fire('roundStart',{...ctx,round:combat.round,key:`${combat.id}:round:${combat.round}`});
         if (combat.round === 1) this.fire('combatStart',{...ctx,key:`${combat.id}:start`});
@@ -56,10 +60,12 @@ export class Director {
       if (Object.hasOwn(change,'initiative') && Number.isFinite(c.initiative)) this.fire('initiative',{...ctx,key:`${c.parent?.id}:${c.id}:initiative:${c.initiative}`});
       if ((change.defeated === true || change.isDefeated === true) && c.isDefeated)
         this.fire('defeated',{...ctx,key:`${c.parent?.id}:${c.actor?.uuid || c.id}:defeated`});
+      if (Object.hasOwn(change,'defeated') || Object.hasOwn(change,'hidden')) this.evaluateCombat(c.parent);
     });
     Hooks.on('deleteCombat',(combat)=>{
       this.fire('combatEnd',{combat,key:`${combat.id}:end`});
       for (const set of [this.phaseFired,this.dynamicFired]) for(const k of set) if(k.startsWith(`${combat.id}:`)) set.delete(k);
+      this.lastMetrics.delete(combat.id);
     });
     Hooks.on('createActiveEffect', effect => this.effect('conditionAdded',effect));
     Hooks.on('deleteActiveEffect', effect => this.effect('conditionRemoved',effect));
@@ -86,13 +92,43 @@ export class Director {
     const spell=cleanString(f?.item?.name || f?.itemData?.name || f?.spell?.name || message?.system?.item?.name || message?.subject?.name || '',120);
     this.fire('spellCast',{actor,spell,combat:this.activeCombat,key:`spell:${message.id}`});
   }
+  /** Combatants reduced to what the threshold maths needs. Side comes from token disposition / player ownership. */
+  combatEntries(combat) {
+    return [...(combat?.combatants || [])].filter(c => c.actor).map(c => {
+      const hp=c.actor.system?.attributes?.hp;
+      const disposition=Number(c.token?.disposition ?? c.actor.prototypeToken?.disposition ?? 0);
+      const pc=Boolean(c.actor.hasPlayerOwner);
+      return {hp:Number(hp?.value), max:Number(hp?.max), pc, defeated:Boolean(c.isDefeated),
+        side: pc || disposition === 1 ? 'party' : disposition <= -1 ? 'enemy' : 'neutral'};
+    });
+  }
+  /** Re-measure a fight and play any whole-fight threshold it just crossed (once per combat each). */
+  evaluateCombat(combat) {
+    if(!this.watch.isLeader || !combat?.id) return;
+    const current=combatMetrics(this.combatEntries(combat));
+    const previous=this.lastMetrics.get(combat.id);
+    this.lastMetrics.set(combat.id,current);
+    if(!previous || !combat.started) return;
+    const ctx={combat,sceneId:combat.scene?.id || game.scenes?.active?.id};
+    for(const profile of this.profiles) {
+      if(!profileMatches(profile,ctx)) continue;
+      const prefix=`${combat.id}:${profile.id}:fight:`;
+      const fired=new Set([...this.phaseFired].filter(x=>x.startsWith(prefix)).map(x=>x.slice(prefix.length)));
+      const matched=crossedCombatRules((profile.phases||[]).map(r=>({...r,priority:priority(r.priority,priority(profile.priority))})),previous,current,fired);
+      if(!matched.length) continue;
+      for(const rule of matched) this.phaseFired.add(prefix + rule.id);
+      const pick=matched[matched.length-1];
+      this.playRule(pick,profile.priority,`${profile.name}: ${pick.name || describeThreshold(pick)}`);
+    }
+  }
   handleHP(actor) {
     const current=hpPercent(actor);
     const previous=this.previousHP.get(actor?.uuid);
     this.remember(actor);
-    if(current === null || previous === undefined || current >= previous) return;
     const combat=(game.combats || []).find(c => c.started && [...(c.combatants || [])].some(x => actorMatches(actor.uuid,x.actor))) || this.activeCombat;
     if(!combat?.started || ![...(combat.combatants || [])].some(c => actorMatches(actor.uuid,c.actor))) return;
+    this.evaluateCombat(combat);
+    if(current === null || previous === undefined || current === previous) return;
     const ctx={actor,combat,sceneId:combat.scene?.id || game.scenes?.active?.id};
     for(const profile of this.profiles) {
       // HP phases belong to the profile's boss. Without one they'd fire for every goblin and PC in the fight.
@@ -102,7 +138,7 @@ export class Director {
       const matched=crossedPhases(profile.phases,previous,current,fired);
       if(!matched.length) continue;
       for(const phase of matched) this.phaseFired.add(prefix + phase.id);
-      // A single huge hit may cross multiple thresholds. Play the deepest reached phase, not 3 consecutive interrupts.
+      // A single huge hit (or heal) may cross several thresholds. Play the most extreme one, not consecutive interrupts.
       const deepest=matched[matched.length-1];
       this.playRule(deepest,profile.priority,`${profile.name}: ${deepest.name || `${deepest.threshold}% HP`}`);
     }
@@ -130,7 +166,7 @@ export class Director {
   playRule(rule, base=50, reason='Cue', manualTest=false) {
     const track=this.library.find(t=>t.id === rule.libraryId);
     if(!track) { console.warn(`${MODULE_ID}: missing track for ${reason}`); return false; }
-    this.watch.issue('TRIGGER',{url:track.url,title:track.title,loop:rule.loop ?? track.loop,
+    this.watch.issue('TRIGGER',{url:track.url,title:track.title,loop:rule.loop ?? track.loop,fx:trackFx(track),
       action:rule.action === 'queue'?'queue':'interrupt',resume:Boolean(rule.resume),
       priority:priority(rule.priority,priority(base)),force:Boolean(rule.force),quiet:!manualTest});
     return true;
@@ -179,7 +215,7 @@ export class Director {
       switch(step.action) {
         case 'track': {
           const track=this.library.find(t=>t.id===step.refId);
-          if(track) this.watch.issue('TRIGGER',{url:track.url,title:track.title,loop:track.loop,
+          if(track) this.watch.issue('TRIGGER',{url:track.url,title:track.title,loop:track.loop,fx:trackFx(track),
             action:step.mode==='queue'?'queue':'interrupt',resume:Boolean(step.resume),priority:priority(step.priority,90),quiet:true});
           break;
         }
@@ -261,11 +297,13 @@ export class Director {
       <label>Base priority (0–100)${num('priority',p.priority)}</label>
       ${cb('enabled',p.enabled,'Enabled')}
       <button type="submit">Save profile</button><button type="button" data-op="delete-profile" data-id="${e(p.id)}" class="fwr-dir-danger">Delete</button></form>
-      <h4>Boss HP phases</h4>${p.actorUuid?'':'<p class="fwr-dir-warn">Choose a boss actor above and save the profile. HP phases only run for that actor.</p>'}<div class="fwr-dir-list">${(p.phases||[]).map(x=>`<div class="fwr-dir-item"><strong>${e(x.threshold)}% · ${e(x.name||'Phase')}</strong><small>${e(this.library.find(t=>t.id===x.libraryId)?.title || '(Missing track)')} · Priority ${e(x.priority)} · ${x.action||'interrupt'}</small><button data-op="phase-test" data-id="${e(x.id)}" data-parent="${e(p.id)}">▶</button><button data-op="phase-edit" data-id="${e(x.id)}" data-parent="${e(p.id)}">Edit</button><button data-op="phase-delete" data-id="${e(x.id)}" data-parent="${e(p.id)}">✕</button></div>`).join('')||'<p>No phases configured.</p>'}</div>
+      <h4>Combat thresholds</h4><p class="fwr-dir-hint">Change the music when the fight reaches a point: the boss's HP, all enemies' or the party's pooled HP, the lowest player character's HP, or how many enemies are still standing. Each fires once per combat. Enemies and party are told apart by token disposition (hostile / friendly) and player ownership.</p>${p.actorUuid?'':'<p class="fwr-dir-warn">Boss HP thresholds need a boss actor (choose one above and save). The other measures work without one.</p>'}<div class="fwr-dir-list">${(p.phases||[]).map(x=>`<div class="fwr-dir-item"><strong>${e(x.name||describeThreshold(x))}</strong>${x.name && x.name!==describeThreshold(x)?`<small>${e(describeThreshold(x))}</small>`:''}<small>${e(this.library.find(t=>t.id===x.libraryId)?.title || '(Missing track)')} · Priority ${e(x.priority)} · ${x.action||'interrupt'}</small><button data-op="phase-test" data-id="${e(x.id)}" data-parent="${e(p.id)}">▶</button><button data-op="phase-edit" data-id="${e(x.id)}" data-parent="${e(p.id)}">Edit</button><button data-op="phase-delete" data-id="${e(x.id)}" data-parent="${e(p.id)}">✕</button></div>`).join('')||'<p>No phases configured.</p>'}</div>
       <form data-form="phase" class="fwr-dir-form"><input type="hidden" name="parent" value="${e(p.id)}"><input type="hidden" name="editId" value=""><label>Phase label<input name="name" placeholder="Enraged" maxlength="80"></label>
-      <label>Trigger at HP ≤ %${num('threshold',50)}</label><label>Track<select name="libraryId" required>${trackOptions(this.library)}</select></label>
+      <label>Measure${sel('source',THRESHOLD_SOURCES,p.actorUuid?'actor':'enemies')}</label>
+      <label>When it${sel('direction',{below:'falls to or below',above:'rises to or above'},'below')}</label>
+      <label>Threshold (% — or a count for “enemies still standing”)${num('threshold',50,0,999)}</label><label>Track<select name="libraryId" required>${trackOptions(this.library)}</select></label>
       <label>Priority${num('priority',75)}</label><label>Playback${sel('action',{interrupt:'Interrupt',queue:'Queue'},'interrupt')}</label>
-      ${cb('loop',true,'Loop this phase')} ${cb('resume',false,'Resume previous track')}<button type="submit">Save HP phase</button><button type="button" data-op="phase-preset" data-parent="${e(p.id)}" title="Use track currently selected in this HP phase form for all three thresholds">Preset 75 / 50 / 25%</button></form>
+      ${cb('loop',true,'Loop this phase')} ${cb('resume',false,'Resume previous track')}<button type="submit">Save threshold</button><button type="button" data-op="phase-preset" data-parent="${e(p.id)}" title="Add boss HP thresholds at 75%, 50% and 25%, all using the track selected in this form">Boss HP preset 75 / 50 / 25%</button></form>
       <h4>Dynamic triggers</h4><div class="fwr-dir-list">${(p.triggers||[]).map(x=>`<div class="fwr-dir-item"><strong>${e(x.name)}</strong><small>${e(EVENTS[x.event]||x.event)}${x.match?' · '+e(x.match):''} · P${e(x.priority)}</small><button data-op="trigger-test" data-id="${e(x.id)}" data-parent="${e(p.id)}">▶</button><button data-op="trigger-edit" data-id="${e(x.id)}" data-parent="${e(p.id)}">Edit</button><button data-op="trigger-delete" data-id="${e(x.id)}" data-parent="${e(p.id)}">✕</button></div>`).join('')||'<p>No dynamic triggers yet.</p>'}</div>
       <form data-form="trigger" class="fwr-dir-form"><input type="hidden" name="parent" value="${e(p.id)}"><input type="hidden" name="editId" value="">
       <label>Name<input name="name" required maxlength="100" placeholder="Lich casts Power Word Kill"></label>
@@ -321,7 +359,8 @@ export class Director {
     if(op==='phase-preset') {
       const form=this.dialog.querySelector('[data-form="phase"]');
       const trackId=form?.elements.libraryId.value;
-      if(!this.library.some(t=>t.id===trackId)) {ui.notifications?.warn('Select a library track in the HP phase form first.');return;}
+      if(!this.library.some(t=>t.id===trackId)) {ui.notifications?.warn('Select a library track in the threshold form first.');return;}
+      if(!this.profiles.find(x=>x.id===parent)?.actorUuid) {ui.notifications?.warn('Boss HP thresholds need a boss actor. Choose one in the profile and save it first.');return;}
       const preset=[75,50,25].map((n,i)=>({id:uid(),name:`Phase ${n}%`,enabled:true,threshold:n,libraryId:trackId,priority:75+i*5,action:'interrupt',resume:false,loop:true}));
       return this.saveProfiles(this.profiles.map(p=>p.id===parent?{...p,phases:[...(p.phases||[]),...preset]}:p));
     }
@@ -332,6 +371,7 @@ export class Director {
       const form=this.dialog.querySelector(`[data-form="${kind}"]`);
       if(!entity || !form) return;
       form.elements.editId.value=entity.id;
+      if(kind==='phase') { form.elements.source.value='actor'; form.elements.direction.value='below'; }
       for(const [field,value] of Object.entries(entity)) {
         const input=form.elements[field];
         if(!input) continue;
@@ -343,7 +383,7 @@ export class Director {
         if(refField) form.elements[refField].value=entity.refId||'';
       }
       const submit=form.querySelector('button[type="submit"]');
-      if(submit) submit.textContent=`Update ${kind==='step'?'timeline step':kind==='phase'?'HP phase':'dynamic trigger'}`;
+      if(submit) submit.textContent=`Update ${kind==='step'?'timeline step':kind==='phase'?'threshold':'dynamic trigger'}`;
       form.classList.add('fwr-dir-editing');
       form.scrollIntoView({block:'center',behavior:'smooth'});
       form.querySelector('input[name="name"]')?.focus();return;
@@ -371,10 +411,13 @@ export class Director {
       if(form.dataset.form==='phase' || form.dataset.form==='trigger') {
         if(!this.library.some(x=>x.id===data.libraryId)) throw new Error('Choose a saved library track first.');
         const prop=form.dataset.form==='phase'?'phases':'triggers';
-        const threshold=Math.max(0,Math.min(100,Number(data.threshold)||0));
-        const entry={id:data.editId||uid(),name:cleanString(data.name || `Phase ${threshold}%`,100),libraryId:data.libraryId,
+        const source=THRESHOLD_SOURCES[data.source] ? data.source : 'actor';
+        if(form.dataset.form==='phase' && source==='actor' && !this.profiles.find(x=>x.id===data.parent)?.actorUuid)
+          throw new Error('Boss HP thresholds need a boss actor on this profile. Pick one and save the profile first, or choose another measure.');
+        const threshold=Math.max(0,Math.min(isPercentSource(source)?100:999,Math.round(Number(data.threshold)||0)));
+        const entry={id:data.editId||uid(),name:cleanString(data.name || (form.dataset.form==="phase" ? describeThreshold({source,threshold,direction:data.direction}) : "Trigger"),100),libraryId:data.libraryId,
           priority:priority(data.priority,60),action:data.action==='queue'?'queue':'interrupt',resume:chk('resume'),loop:chk('loop'),enabled:true};
-        if(prop==='phases') entry.threshold=threshold;
+        if(prop==='phases') Object.assign(entry,{threshold,source,direction:data.direction==='above'?'above':'below'});
         else Object.assign(entry,{event:data.event,match:cleanString(data.match,120),round:Math.max(0,Math.floor(Number(data.round)||0)),actorUuid:data.actorUuid||'',once:chk('once')});
         return await this.saveProfiles(this.profiles.map(p=>p.id===data.parent?{...p,[prop]:(data.editId ? (p[prop]||[]).map(x=>x.id===data.editId?entry:x) : [...(p[prop]||[]),entry]).slice(0,100)}:p));
       }

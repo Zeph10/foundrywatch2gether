@@ -21,6 +21,7 @@ A Watch2Gether-inspired, **single shared room** for video and music playback, sy
 A GM opens **⚜ Director** from the Watch Room header, **⚜ Cinematic Director** from the Music Library, or **Director** from supported Actor sheets. No extra dependencies are needed. The window is Foundry-style charcoal/gray/gold and remains available when the shared room is closed.
 
 - **Encounter profiles**: Create named, persistent profiles; associate one with a world actor and optionally a scene. Profiles match that actor in a combat and may contain any number of boss HP phases and dynamic event rules. Profiles can be paused individually. A profile is reusable across sessions and combats. A given HP threshold fires once per combat and actor, even after healing. If one hit crosses several thresholds, only the deepest reached phase plays. **Configure the scene/actor before combat**, and ensure the boss is an actor in the combat tracker.
+- **Combat thresholds** (formerly boss phases): change the music when the boss's HP, all enemies' pooled HP, the party's pooled HP, the lowest player character's HP, or the number of enemies still standing falls below or rises above a value. Each fires once per combat; the boss measure needs a boss actor, the others don't.
 - **Boss phases**: Configure a percentage threshold (0–100), choose a library track, set loop, resume, queue/interrupt and priority. A button can generate starter phases at **75%, 50%, and 25%** from the currently selected track; individual phase tracks and settings can then be edited. HP phases use the actor's `system.attributes.hp.value/max` where available (D&D 5e and similarly structured systems). If an actor lacks usable HP values, boss-phase automation cannot run.
 - **Dynamic triggers**: Within each profile, react to combat start/end, initiative, turn start, **round number**, defeated/0 HP, scene activation, Active Effect/condition added or removed, **spell chat card** (best-effort D&D 5e detection), or a manual trigger. Narrow a rule by actor, round, or a case-insensitive spell/condition name. Mark rules once-per-combat and assign individual tracks, playback mode, loop/resume and priority. A macro API allows custom events when a system's native hooks differ.
 - **Priority system**: A currently playing trigger track with priority 90 resists interruption by a priority 50 event. Set each track/event priority **0–100**. The default is 50; boss-phase presets use 75, 80, and 85. Equal-priority cues are allowed; queued media can always be added; GM manual library playback can explicitly force a lower-priority interruption. Player-requested queue selection and manual skip continue using the original permissions/voting model.
@@ -76,6 +77,21 @@ game.modules.get('foundry-watch-room').api.trigger('Boss Entrance');
 ```
 
 Only the GM or permitted live playback controllers can invoke a configured manual trigger. See the music manager for the exact name.
+
+## Track sound: instrumental mode and fades
+
+Controllers see a **Track sound** panel in the queue sidebar. Its settings apply to everyone:
+
+- **Instrumental (reduce vocals)** removes centre-panned vocals from audio/video **files** (uploaded to Foundry, or direct links whose server allows CORS). It's the classic mid/side technique done live in the browser. It works well on typical studio mixes where the lead vocal sits in the middle. It can't remove vocals that are panned or double-tracked wide, and it thins out other centred instruments a little. Mono recordings can't be separated, and the room says so. For YouTube/Vimeo/Twitch, the panel offers a search for an instrumental version instead. For an important track, a real instrumental file always sounds best.
+- **Fade in / Fade out** (seconds) for the current track. Set defaults per track in the Music Library; they carry into triggers, boss phases and cinematics.
+- **Fade out & pause** / **Fade to next** for ending a scene smoothly.
+- **Crossfade between tracks** (Module Settings) blends one track into the next. A track's own fade-in/out takes precedence.
+
+## Who's listening and joining in
+
+The **Who's listening** panel shows every logged-in player and what their browser is doing: listening, paused, muted, player closed, needs a click to start sound, and so on. "Not responding" usually means the module isn't enabled for that player or their page is still loading. GMs can **Nudge** anyone who isn't listening.
+
+When initiative is rolled, players who aren't listening get a **Join & listen** banner. Clicking it opens the room and also unlocks browser sound, so it's the easiest way to get everyone hearing the combat music. Turn it off in Module Settings → **Ask players to join when initiative is rolled**.
 
 ## Videos that can't be embedded
 

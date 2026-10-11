@@ -1,7 +1,9 @@
-import { MODULE_ID, MAX_QUEUE, initialState, expectedPosition, canControl, reduceWithAutoOpen, serverNow, parseSource } from "./state.js";
+import { MODULE_ID, MAX_QUEUE, MAX_FADE, initialState, expectedPosition, canControl, reduceWithAutoOpen, serverNow, parseSource, fadeGain, supportsInstrumental, trackFx } from "./state.js";
+import { audioContext, resumeAudio, isCrossOrigin, instrumentalSearchUrl } from "./audio-fx.js";
 import { createAdapter, checkEmbeddable } from "./providers.js";
 import { ScreenShare } from "./streams.js";
 import { ExternalViewer } from "./external.js";
+import { Presence, LISTENER_STATUS } from "./presence.js";
 import { raise } from "./ui.js";
 import { MusicFeatures } from "./music-features.js";
 import { Director } from "./director.js";
@@ -18,7 +20,11 @@ const DRIFT_FORCED = 0.75;
 /** Intents whose rejection is an expected race and shouldn't be reported to the user. */
 const QUIET_REJECTIONS = new Set(["ENDED", "NEXT", "VOTE_TIMEOUT"]);
 /** Identifies the player a room entry needs: switching a video to/from pop-ups keeps its uid but needs a rebuild. */
-const playerKey = entry => entry ? `${entry.uid}${entry.external ? ":external" : ""}` : null;
+// Cross-origin files must be reloaded with CORS to switch on instrumental mode, so that's part of the key too.
+const playerKey = entry => entry ? `${entry.uid}${entry.external ? ":external" : ""}${
+  entry.instrumental && entry.provider === "file" && isCrossOrigin(entry.url) ? ":fx" : ""}` : null;
+/** Seconds used by the "Fade out" buttons when the track has no fade-out of its own. */
+const DEFAULT_MANUAL_FADE = 4;
 const LOOP_LABELS = { off: "Repeat: off", one: "Repeat: current track", queue: "Repeat: whole queue" };
 
 
@@ -49,6 +55,8 @@ class WatchRoom {
     this.music = new MusicFeatures(this);
     this.streams = new ScreenShare(this);
     this.external = new ExternalViewer(this);
+    this.presence = new Presence(this);
+    this.promptedCombats = new Set();
     this.director = new Director(this);
   }
 
@@ -78,12 +86,21 @@ class WatchRoom {
     window.addEventListener("resize", () => this.scenePosition(true));
     // Progress repaints are cheap and keep the clock smooth; drift checks are less frequent.
     this.progressTimer = setInterval(() => { if (!this.hidden) this.paintProgress(); }, 500);
+    // Fades are computed from the room clock every 100 ms, so all clients ramp together.
+    this.fadeTimer = setInterval(() => this.fadeTick(), 100);
     this.timer = setInterval(() => {
       if (!this.hidden) {
         this.scenePosition();
         this.reconcile(false).catch(console.error);
       }
     }, 2500);
+    this.presence.start();
+    // Initiative: invite everyone who isn't listening yet (once per combat). Waits a moment so encounter
+    // music triggered by the same roll can open the room first.
+    Hooks.on("updateCombatant", (combatant, changes) => {
+      if (!this.isLeader || !Object.hasOwn(changes ?? {}, "initiative") || !Number.isFinite(combatant.initiative)) return;
+      this.promptForCombat(combatant.parent);
+    });
     // If the person sharing their screen disconnects, end the share so the room doesn't sit on a dead stream.
     Hooks.on("userConnected", (user, connected) => {
       const current = this.state.current;
@@ -133,6 +150,9 @@ class WatchRoom {
     if (!payload || typeof payload !== "object") return;
     if (payload.kind === "intent" && this.isLeader) this.processIntent(payload);
     if (payload.kind === "rtc") this.streams.onSignal(payload);
+    if (payload.kind === "presence") this.presence.receive(payload);
+    if (payload.kind === "join-prompt" && payload.to?.includes(game.user.id) && game.users.get(payload.fromId)?.isGM)
+      this.promptJoin(payload.reason);
     if (payload.kind === 'director-journal' && payload.actorId && game.users.get(payload.actorId)?.isGM)
       this.director.showJournal(payload.journalId);
     if (payload.kind === "director-event" && this.isLeader && game.users.get(payload.actorId)?.isGM)
@@ -192,7 +212,7 @@ class WatchRoom {
         if (!(actor.isGM || canControl(this.state,actor))) return;
         const track = this.music.library.find(t => t.id === intent.libraryId);
         if (!track) return;
-        intent = {type:'TRIGGER',url:track.url,title:track.title,loop:track.loop,
+        intent = {type:'TRIGGER',url:track.url,title:track.title,loop:track.loop,fx:trackFx(track),
           action:intent.action==='queue'?'queue':'interrupt',priority:Number(intent.priority ?? 50),
           resume:Boolean(intent.resume),force:Boolean(intent.force && actor.isGM),quiet:Boolean(intent.quiet)};
         if (!actor.isGM) actor = game.users.get(game.user.id);
@@ -203,7 +223,7 @@ class WatchRoom {
         const track = this.music.library.find(t => t.id === rule?.libraryId);
         if (!rule || !track) return;
         // Only the leader's trusted configuration determines what the trigger plays.
-        intent = {type:'TRIGGER',url:track.url,title:track.title,loop:track.loop,action:rule.action,resume:rule.resume,priority:rule.priority ?? 50};
+        intent = {type:'TRIGGER',url:track.url,title:track.title,loop:track.loop,fx:trackFx(track),action:rule.action,resume:rule.resume,priority:rule.priority ?? 50};
         // Don't grant arbitrary TRIGGER permission to users via the socket.
         if (!actor.isGM) actor = game.users.get(game.user.id);
       }
@@ -261,12 +281,15 @@ class WatchRoom {
         const playbackChanged = !prior.open || prior.playing !== s.playing || prior.position !== s.position ||
           prior.startedAt !== s.startedAt;
         this.reconcile(playbackChanged).catch(console.error);
+        if (Boolean(prior.current?.instrumental) !== Boolean(s.current?.instrumental)) this.applyInstrumental();
+        this.applyVolume(true);
       }
     }
   }
 
   unloadPlayer() {
     ++this.loadGeneration;
+    this.endCrossfades();
     try { this.adapter?.destroy(); } catch (error) { console.warn(error); }
     this.adapter = null;
     this.loadedUid = null;
@@ -282,7 +305,7 @@ class WatchRoom {
     root.setAttribute("aria-label", "Foundry shared watch room");
     root.innerHTML = `
       <header class="fwr-header" data-drag="true">
-        <div class="fwr-brand">${icon("fa-tv")} <strong>Watch Room</strong> <span class="fwr-badge">SHARED</span></div>
+        <div class="fwr-brand">${icon("fa-tv")} <strong>Watch Room</strong> <span class="fwr-badge" data-listen-badge title="People listening right now">SHARED</span></div>
         <div class="fwr-top-actions">
           <button type="button" data-act="compact" title="Switch between compact thumbnail and full player" aria-label="Toggle compact player">${icon("fa-down-left-and-up-right-to-center")}</button>
           <button type="button" data-act="music-manager" title="Saved music and encounter triggers" aria-label="Music library and triggers">${icon("fa-music")}</button>
@@ -354,6 +377,25 @@ class WatchRoom {
             </div>
           </form>
           <ol class="fwr-list" data-list></ol>
+          <div class="fwr-listeners" data-listeners>
+            <div class="fwr-section-heading"><strong>Who's listening</strong><span data-listen-count></span></div>
+            <ul class="fwr-listener-list" data-listener-list></ul>
+            <small class="fwr-listener-offline" data-listener-offline></small>
+          </div>
+          <div class="fwr-fx" data-fx>
+            <div class="fwr-section-heading"><strong>Track sound</strong><small data-fx-scope>Applies for everyone</small></div>
+            <label class="fwr-fx-check"><input type="checkbox" data-fx-instrumental> Instrumental (reduce vocals)</label>
+            <small class="fwr-fx-note" data-fx-note></small>
+            <button type="button" class="fwr-fx-link" data-act="find-instrumental" hidden>${icon("fa-magnifying-glass")} Find an instrumental version on YouTube</button>
+            <div class="fwr-fx-fades">
+              <label>Fade in <input type="number" data-fx-fade="fadeIn" min="0" max="${MAX_FADE}" step="0.5" inputmode="decimal"> s</label>
+              <label>Fade out <input type="number" data-fx-fade="fadeOut" min="0" max="${MAX_FADE}" step="0.5" inputmode="decimal"> s</label>
+            </div>
+            <div class="fwr-fx-actions">
+              <button type="button" data-act="fade-pause" title="Fade the music out for everyone, then pause">${icon("fa-volume-low")} Fade out &amp; pause</button>
+              <button type="button" data-act="fade-next" title="Fade the music out for everyone, then play the next track">${icon("fa-forward")} Fade to next</button>
+            </div>
+          </div>
           <div class="fwr-permissions" data-permissions>
             <div class="fwr-section-heading"><strong>Playback permissions</strong></div>
             <div data-members></div>
@@ -377,6 +419,16 @@ class WatchRoom {
     q(root, "[data-add-form]").addEventListener("submit", event => this.onAdd(event));
     q(root, "[data-independent]").addEventListener("change", event => this.setIndependent(event.target.checked));
     q(root, '[data-vote-mode]').addEventListener('change', e => this.issue('VOTE_MODE',{enabled:e.target.checked}));
+    q(root, "[data-fx-instrumental]").addEventListener("change", event => {
+      // This change is a click, so it's the moment to unlock Web Audio for this browser.
+      audioContext(); resumeAudio();
+      const current = this.state.current;
+      if (current) this.issue("TRACK_FX", { uid: current.uid, fx: { instrumental: event.target.checked } });
+    });
+    root.querySelectorAll("[data-fx-fade]").forEach(input => input.addEventListener("change", event => {
+      const current = this.state.current;
+      if (current) this.issue("TRACK_FX", { uid: current.uid, fx: { [event.target.dataset.fxFade]: Number(event.target.value) || 0 } });
+    }));
     const volume = q(root, "[data-volume]");
     volume.addEventListener("input", event => this.setVolume(Number(event.target.value), false));
     volume.addEventListener("change", event => this.setVolume(Number(event.target.value), true));
@@ -410,6 +462,7 @@ class WatchRoom {
     this.createUI();
     this.hidden = false;
     this.root.hidden = false;
+    queueMicrotask(() => this.presence?.update());
     this.applyGeometry = true;
     this.updateUI();
     this.updateLauncher();
@@ -419,9 +472,11 @@ class WatchRoom {
   }
   hide() {
     this.hidden = true;
+    queueMicrotask(() => this.presence?.update());
     if (this.pipWindow) { try { this.pipWindow.close(); } catch { /* already closed */ } }
     if (this.root) this.root.hidden = true;
     if (this.adapter) { try { this.adapter.pause(); } catch { /* not ready */ } }
+    this.endCrossfades();
     this.observedPlaying = false;
     this.localPlaying = false;
     this.updateLauncher();
@@ -461,8 +516,10 @@ class WatchRoom {
     q(el, '.fwr-media').classList.toggle('fwr-audio',Boolean(s.current?.audio));
     q(el, '[data-act="compact"]').title = this.compact ? 'Expand player' : 'Compact thumbnail player';
     q(el, '[data-act="compact"]').innerHTML = this.compact ? icon('fa-up-right-and-down-left-from-center') : icon('fa-down-left-and-up-right-to-center');
-    q(el, "[data-title]").textContent = s.current?.title || "No video selected";
+    q(el, "[data-title]").textContent = `${s.current?.title || "No video selected"}${s.current?.instrumental ? " · instrumental" : ""}`;
     this.paintFallback();
+    this.paintFx();
+    this.paintListeners();
     q(el, "[data-title]").title = s.current?.title || "";
     q(el, "[data-count]").textContent = `${s.queue.length} queued`;
     const hostUser = game.users.get(s.hostId);
@@ -699,6 +756,22 @@ class WatchRoom {
       case "browse": this.browseFiles(); break;
       case "external-open": this.external.open(); break;
       case "fallback-skip": this.requestSongChange("NEXT"); break;
+      case "nudge": {
+        const user = game.users.get(button.dataset.user);
+        if (!user?.active || !game.user.isGM) break;
+        game.socket.emit(SOCKET, { kind: "join-prompt", fromId: game.user.id, to: [user.id],
+          reason: `${game.user.name} invites you to the Watch Room${this.state.current ? `: ${this.state.current.title}` : ""}.` });
+        this.setMessage(`Sent ${user.name} an invitation to join.`);
+        break;
+      }
+      case "fade-pause": case "fade-next": {
+        const seconds = Number(this.state.current?.fadeOut) || DEFAULT_MANUAL_FADE;
+        this.issue("FADE", { ms: seconds * 1000, then: act === "fade-next" ? "next" : "pause" });
+        break;
+      }
+      case "find-instrumental":
+        if (this.state.current) window.open(instrumentalSearchUrl(this.state.current.title), "_blank", "noopener");
+        break;
       case "external-all":
         if (this.state.current) { this.issue("EXTERNAL", {uid: this.state.current.uid, external: true}); this.external.open(); }
         break;
@@ -738,6 +811,7 @@ class WatchRoom {
       case "pip": await this.openPiP(); break;
       case "unlock": {
         this.showUnlock(false);
+        audioContext(); resumeAudio();
         try {
           await this.adapter?.play();
           await this.reconcile(true);
@@ -829,11 +903,12 @@ class WatchRoom {
   }
   setVolume(value, persist) {
     this.currentVolume = clamp(Number.isFinite(value) ? value : 0.7, 0, 1);
-    if (persist) game.settings.set(MODULE_ID, "volume", this.currentVolume);
-    try { this.adapter?.setVolume(this.currentVolume); } catch { /* not ready */ }
+    if (persist) { game.settings.set(MODULE_ID, "volume", this.currentVolume); this.presence.update(); }
+    this.applyVolume(true);
     this.paintMute();
   }
   showUnlock(show) {
+    if (this.blocked !== show) queueMicrotask(() => this.presence?.update());
     this.blocked = show;
     const b = q(this.root, "[data-act=\"unlock\"]");
     if (b) b.hidden = !show;
@@ -850,10 +925,20 @@ class WatchRoom {
     this.playerErrorUid = null;
     this.localPlaying = false;
     this.showUnlock(false);
-    if (this.adapter) { try { this.adapter.destroy(); } catch (err) { console.warn(err); } this.adapter = null; }
+    const outgoing = this.adapter;
+    const outgoingEntry = this.adapterEntry;
+    const wasPlaying = Boolean(this.lastPlayingAt && Date.now() - this.lastPlayingAt < 1500);
+    this.adapter = null;
+    this.adapterEntry = entry;
+    if (outgoing) {
+      const seconds = wasPlaying && entry && outgoingEntry?.uid !== entry.uid && !entry.external && !["external", "stream"].includes(outgoing.kind)
+        ? this.crossfadeSeconds(outgoingEntry, entry) : 0;
+      if (seconds > 0) this.crossfadeOut(outgoing, seconds);
+      else { try { outgoing.destroy(); } catch (err) { console.warn(err); } }
+    }
     const mount = q(this.root, "[data-player]");
     if (!mount) { this.loadedUid = null; return; }
-    if (!entry) { mount.replaceChildren(); this.setMessage(""); this.paintProgress(); return; }
+    if (!entry) { for (const c of [...mount.children]) if (!c.classList.contains("fwr-fading")) c.remove(); this.setMessage(""); this.paintProgress(); return; }
     if (this.embedBlockedUid !== entry.uid) { this.embedBlockedUid = null; this.embedBlockedReason = ""; }
     this.paintFallback();
     this.setMessage(entry.external ? "" : `Loading ${entry.provider === "stream" ? "screen share" : entry.provider + " player"}…`);
@@ -872,14 +957,203 @@ class WatchRoom {
         new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error("Video provider did not become ready within 15 seconds.")), 15000); })
       ]);
       if (generation !== this.loadGeneration || this.hidden) return;
-      adapter.setVolume(this.currentVolume);
+      this.applyVolume(true);
       if (this.playerErrorUid !== entry.uid) this.setMessage("");
+      if (entry.instrumental) this.applyInstrumental();
       await this.reconcile(true);
       this.probeAutoplay(entry.uid);
     } catch (error) {
       if (generation === this.loadGeneration && this.playerErrorUid !== entry.uid) this.setMessage(`Player error: ${error.message}`, true);
       console.error(`${MODULE_ID} | Player load failed`, error);
     } finally { clearTimeout(timeout); }
+  }
+
+  /** Local volume × the room's fade envelope, pushed to the player when it changes. */
+  applyVolume(force = false) {
+    const adapter = this.adapter;
+    if (!adapter) return;
+    const duration = Number(adapter.getDuration?.()) || 0;
+    const gain = this.independent ? 1 : fadeGain(this.state, serverNow(), duration);
+    this.lastGain = gain;
+    const volume = Math.round(this.currentVolume * gain * 1000) / 1000;
+    if (!force && Math.abs(volume - (this.appliedVolume ?? -1)) < 0.005) return;
+    this.appliedVolume = volume;
+    try { adapter.setVolume(volume); } catch { /* not ready */ }
+  }
+
+  fadeTick() {
+    if (this.observedPlaying) this.lastPlayingAt = Date.now();
+    if (!this.hidden && this.adapter) this.applyVolume();
+    // The leader finishes a manual fade (pause / next / stop) once it has run its course.
+    const fade = this.state.fade;
+    if (fade && this.isLeader && serverNow() >= fade.startedAt + fade.ms && this.fadeDoneFor !== `${fade.uid}:${fade.startedAt}`) {
+      this.fadeDoneFor = `${fade.uid}:${fade.startedAt}`;
+      this.issue("FADE_DONE", { quiet: true });
+    }
+  }
+
+  /** Crossfade length when one track replaces another: incoming fade-in, else outgoing fade-out, else the world default. */
+  crossfadeSeconds(outgoing, incoming) {
+    const fromTrack = Number(incoming?.fadeIn) || Number(outgoing?.fadeOut) || 0;
+    if (fromTrack > 0) return Math.min(fromTrack, MAX_FADE);
+    return Math.max(0, Math.min(MAX_FADE, Number(game.settings.get(MODULE_ID, "crossfade")) || 0));
+  }
+
+  /** Keep the outgoing player running underneath while its volume (and picture) fade away. */
+  crossfadeOut(adapter, seconds) {
+    this.fading ||= new Set();
+    const holder = adapter.holder;
+    holder?.classList.add("fwr-fading");
+    if (holder) holder.style.transitionDuration = `${seconds}s`;
+    requestAnimationFrame(() => holder?.classList.add("fwr-fading-out"));
+    const from = this.appliedVolume ?? this.currentVolume;
+    const started = performance.now();
+    const job = { adapter, timer: null };
+    const step = () => {
+      const t = Math.min(1, (performance.now() - started) / (seconds * 1000));
+      try { adapter.setVolume(from * (1 - t)); } catch { /* gone */ }
+      if (t >= 1) { this.fading.delete(job); try { adapter.destroy(); } catch { /* gone */ } }
+      else job.timer = setTimeout(step, 50);
+    };
+    this.fading.add(job);
+    step();
+  }
+  endCrossfades() {
+    for (const job of this.fading || []) { clearTimeout(job.timer); try { job.adapter.destroy(); } catch { /* gone */ } }
+    this.fading?.clear();
+  }
+
+  /** Switch the current file's vocal reduction to match the room, and warn when it can't work well. */
+  async applyInstrumental() {
+    const adapter = this.adapter, entry = this.state.current;
+    if (!adapter?.setInstrumental || !entry) return;
+    const result = await adapter.setInstrumental(Boolean(entry.instrumental));
+    if (adapter !== this.adapter) return;
+    this.applyVolume(true);
+    if (!result.ok) {
+      if (result.blocked) this.showUnlock(true);
+      this.setMessage(result.reason, true);
+      return;
+    }
+    if (!entry.instrumental || this.stereoCheckedFor === entry.uid) return;
+    this.stereoCheckedFor = entry.uid;
+    // Mono recordings have no stereo difference to work with; tell people instead of leaving them puzzled.
+    const waitForSound = async () => { for (let i = 0; i < 40 && !this.observedPlaying; i++) await new Promise(r => setTimeout(r, 250)); };
+    await waitForSound();
+    const ratio = await adapter.measureStereo?.();
+    if (adapter !== this.adapter || ratio === null || ratio === undefined) return;
+    if (ratio < 0.04) this.setMessage("This recording is mono, so instrumental mode can't separate the vocals and leaves mostly bass. Use an instrumental version of the track instead.", true);
+  }
+
+  /** "Who's listening" panel and the header count. */
+  paintListeners() {
+    const root = this.root;
+    if (!root || !this.presence) return;
+    const { active, offline, listening } = this.presence.roster();
+    const badge = q(root, "[data-listen-badge]");
+    if (badge) {
+      badge.textContent = this.state.open ? `${listening}/${active.length} listening` : "SHARED";
+      badge.classList.toggle("fwr-badge-alert", this.state.open && listening < active.length);
+    }
+    const list = q(root, "[data-listener-list]");
+    if (!list) return;
+    q(root, "[data-listen-count]").textContent = `${listening} of ${active.length}`;
+    list.replaceChildren(...active.map(({ user, status }) => {
+      const info = LISTENER_STATUS[status] || LISTENER_STATUS.unknown;
+      const li = document.createElement("li");
+      li.className = `fwr-listener fwr-listener-${info.listening ? "on" : "off"}`;
+      li.dataset.status = status;
+      const glyph = document.createElement("i");
+      glyph.className = `fa-solid ${info.icon}`;
+      glyph.setAttribute("aria-hidden", "true");
+      const name = document.createElement("span");
+      name.className = "fwr-listener-name";
+      name.textContent = `${user.name}${user.isGM ? " (GM)" : ""}${user.id === game.user.id ? " — you" : ""}`;
+      const label = document.createElement("small");
+      label.textContent = info.label;
+      li.append(glyph, name, label);
+      li.title = `${user.name}: ${info.label}`;
+      if (game.user.isGM && user.id !== game.user.id && !info.listening && this.state.open) {
+        const nudge = document.createElement("button");
+        nudge.type = "button"; nudge.dataset.act = "nudge"; nudge.dataset.user = user.id;
+        nudge.className = "fwr-nudge";
+        nudge.title = `Ask ${user.name} to join (their click also unblocks sound)`;
+        nudge.innerHTML = `${icon("fa-bell")} Nudge`;
+        li.append(nudge);
+      }
+      return li;
+    }));
+    q(root, "[data-listener-offline]").textContent = offline.length ? `Offline: ${offline.join(", ")}` : "";
+  }
+
+  /** Leader: on the first initiative roll of a combat, invite everyone who isn't listening. */
+  promptForCombat(combat) {
+    if (!combat?.id || this.promptedCombats.has(combat.id) || !game.settings.get(MODULE_ID, "promptOnInitiative")) return;
+    this.promptedCombats.add(combat.id);
+    setTimeout(() => {
+      if (!this.state.open) return;
+      const to = [...game.users].filter(u => u.active && u.id !== game.user.id &&
+        (!this.presence.isListening(u.id) || this.presence.statusOf(u.id) === "blocked")).map(u => u.id);
+      const reason = `Roll for initiative! ${this.state.current ? `“${this.state.current.title}” is playing` : "Combat music is starting"} in the Watch Room.`;
+      if (to.length) game.socket.emit(SOCKET, { kind: "join-prompt", fromId: game.user.id, to, reason });
+      if (!this.presence.isListening(game.user.id)) this.promptJoin(reason);
+    }, 2500);
+  }
+
+  /** A small banner asking this user to join. Clicking Join also counts as the click browsers need for sound. */
+  promptJoin(reason = "You're invited to the Watch Room.") {
+    if (!this.state.open) return;
+    if (this.presence.isListening(game.user.id) && !this.blocked) return;
+    document.getElementById("fwr-join-prompt")?.remove();
+    const box = document.createElement("div");
+    box.id = "fwr-join-prompt";
+    box.setAttribute("role", "alertdialog");
+    box.setAttribute("aria-label", "Join the Watch Room");
+    box.innerHTML = `<div class="fwr-join-text"><i class="fa-solid fa-music" aria-hidden="true"></i><span></span></div>
+      <div class="fwr-join-actions"><button type="button" data-join="yes"><i class="fa-solid fa-headphones" aria-hidden="true"></i> Join & listen</button>
+      <button type="button" data-join="no">Not now</button></div>`;
+    box.querySelector("span").textContent = reason;
+    const close = () => { clearTimeout(timer); box.remove(); };
+    const timer = setTimeout(close, 60000);
+    box.addEventListener("click", async event => {
+      const choice = event.target.closest("[data-join]")?.dataset.join;
+      if (!choice) return;
+      close();
+      if (choice !== "yes") return;
+      audioContext(); resumeAudio();          // inside the click: unlocks Web Audio and media playback
+      this.show();
+      this.showUnlock(false);
+      if (this.state.current?.external) this.external.open();
+      try { await this.adapter?.play?.(); } catch { /* the player may still be loading; reconcile retries */ }
+      this.reconcile(true).catch(() => {});
+    });
+    document.body.append(box);
+    raise(box);
+    box.querySelector('[data-join="yes"]').focus({ preventScroll: true });
+  }
+
+  paintFx() {
+    const panel = q(this.root, "[data-fx]");
+    if (!panel) return;
+    const entry = this.state.current;
+    panel.hidden = !this.canControl || !entry || entry.provider === "stream";
+    if (panel.hidden) return;
+    const supported = supportsInstrumental(entry);
+    const box = q(panel, "[data-fx-instrumental]");
+    box.checked = Boolean(entry.instrumental);
+    box.disabled = !supported;
+    q(panel, "[data-fx-note]").textContent = supported
+      ? "Removes centre-panned vocals from stereo mixes. Works best on studio tracks; it can't help with mono recordings."
+      : entry.external ? "Not available for pop-up videos."
+      : "Only for audio/video files (uploads or direct links). YouTube, Vimeo and Twitch don't give access to their audio.";
+    q(panel, '[data-act="find-instrumental"]').hidden = supported || !["youtube", "vimeo", "twitch"].includes(entry.provider);
+    for (const input of panel.querySelectorAll("[data-fx-fade]")) {
+      if (document.activeElement !== input) input.value = String(Number(entry[input.dataset.fxFade]) || 0);
+      input.disabled = Boolean(entry.live);
+    }
+    const playing = Boolean(this.state.playing && !this.state.fade);
+    q(panel, '[data-act="fade-pause"]').disabled = !playing;
+    q(panel, '[data-act="fade-next"]').disabled = !playing;
   }
 
   /** If the room is playing but no "playing" event arrives, the browser most likely blocked autoplay. */
@@ -898,6 +1172,7 @@ class WatchRoom {
 
   playerEvent(status, uid, detail, info = {}) {
     if (uid !== this.state.current?.uid || this.hidden) return;
+    if (["playing", "paused", "error", "blocked"].includes(status)) queueMicrotask(() => this.presence.update());
     if (status === "error" && info?.blocked) {
       this.embedBlockedUid = uid;
       this.embedBlockedReason = detail || "";
@@ -1238,6 +1513,16 @@ Hooks.once("init", () => {
     name: "Screen share: ICE servers (advanced)",
     hint: 'JSON list of STUN/TURN servers for screen sharing, e.g. [{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]. Leave empty to use public STUN, which works on most home networks. Add a TURN server if players behind strict firewalls can\'t connect.',
     scope: "world", config: true, type: String, default: ""
+  });
+  game.settings.register(MODULE_ID, "promptOnInitiative", {
+    name: "Ask players to join when initiative is rolled",
+    hint: "On the first initiative roll of a combat, anyone who isn't listening gets a Join button (which also unblocks browser sound). Only when the room is open, e.g. after encounter music starts.",
+    scope: "world", config: true, type: Boolean, default: true
+  });
+  game.settings.register(MODULE_ID, "crossfade", {
+    name: "Crossfade between tracks (seconds)",
+    hint: "When one track replaces another, fade the old one out over this many seconds. Tracks with their own fade-in or fade-out use that instead. 0 switches instantly.",
+    scope: "world", config: true, type: Number, default: 0, range: { min: 0, max: 15, step: 0.5 }
   });
   game.settings.register(MODULE_ID, "externalFollow", {
     name: "Pop-up follows the room", scope: "client", config: false, type: Boolean, default: true

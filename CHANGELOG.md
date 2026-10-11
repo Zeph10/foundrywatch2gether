@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.5.0 — 2026-10-11
+
+### Instrumental mode (vocal reduction)
+- New **Instrumental (reduce vocals)** switch in the **Track sound** panel and on library tracks. It removes centre-panned vocals using mid/side processing in the browser (Web Audio). The bass is kept, and the result plays identically in both speakers so it stays audible on mono devices. Switching is smooth and applies to everyone.
+- Works on audio/video **files** (Foundry uploads, or direct links whose server allows CORS). YouTube, Vimeo and Twitch don't expose their audio, so for those the panel offers **Find an instrumental version on YouTube**.
+- Mono recordings are detected and the room explains that they can't be separated. Measured on a test mix: the centred "voice" drops by about 34 dB while side-panned instruments keep their level.
+
+### Fades
+- **Fade in / fade out** per track (0–60 s), in the Track sound panel and on library tracks. Library fades carry into encounter triggers, boss phases and cinematics. Fades follow the shared room clock, so every player ramps together. Fade-in also applies when a track resumes from pause. Fade-out happens before the track's end, and not on looping tracks.
+- **Crossfade**: when one track replaces another, the old one keeps playing underneath while it fades out (and its picture fades away). The length is the new track's fade-in, else the old track's fade-out, else the new world setting **Crossfade between tracks**.
+- **Fade out & pause** and **Fade to next** buttons for controllers. A track paused this way fades back in over the same time when resumed.
+
+### Combat thresholds
+- The Director's *Boss HP phases* are now **Combat thresholds** with five measures: the boss's HP %, **all enemies' pooled HP %**, **the party's pooled HP %**, **the lowest player character's HP %**, and **enemies still standing**. Enemies and party are told apart by token disposition and player ownership.
+- Each threshold can fire when the value **falls to or below** or **rises to or above** it (e.g. the party heals back up). Each fires once per combat. When several cross at once, the highest-priority, most extreme one plays.
+- Only boss-HP thresholds need a boss actor on the profile; the others work for any fight in the profile's scene.
+
+### Who's listening
+- New **Who's listening** panel lists everyone logged in with what they're actually doing: listening, paused, muted, player closed, needs a click to start sound, in the pop-up, loading, can't play this video, or not responding (module not loaded). Offline users are listed underneath, and the header badge shows e.g. "3/5 listening".
+- GMs get a **Nudge** button next to anyone who isn't listening. It sends that player an invitation.
+
+### Join prompt on initiative
+- On the first initiative roll of a combat, everyone who isn't listening gets a **Join & listen** banner (if the room is open, e.g. once encounter music has started). Clicking it opens the room and also counts as the click browsers require before playing sound. On by default. New world setting **Ask players to join when initiative is rolled**.
+
 ## 1.4.0 — 2026-10-07
 
 ### Videos that can't be embedded
