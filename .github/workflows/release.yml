@@ -71,8 +71,12 @@ jobs:
           npm pack lamejs@1.2.1 --silent
           tar -xzf lamejs-1.2.1.tgz
           if [ -f package/lame.min.js ]; then cp package/lame.min.js vendor/lamejs/lame.min.js; else cp package/lame.all.js vendor/lamejs/lame.min.js; fi
-          cp package/LICENSE vendor/lamejs/LICENSE 2>/dev/null || curl -sL https://www.gnu.org/licenses/lgpl-3.0.txt -o vendor/lamejs/LICENSE
-          printf 'lamejs 1.2.1 (https://github.com/zhuker/lamejs), unmodified, LGPL-3.0. Used by the Watch Room converter for MP3 encoding.\n' > vendor/lamejs/README.txt
+          cp package/LICENSE vendor/lamejs/LICENSE 2>/dev/null || true
+          # Full licence texts: LGPL-3.0 builds on GPL-3.0, so ship both.
+          curl -fsSL https://www.gnu.org/licenses/lgpl-3.0.txt -o vendor/lamejs/COPYING.LESSER
+          curl -fsSL https://www.gnu.org/licenses/gpl-3.0.txt -o vendor/lamejs/COPYING
+          grep -q "GNU LESSER GENERAL PUBLIC LICENSE" vendor/lamejs/COPYING.LESSER
+          printf 'lamejs 1.2.1 (https://github.com/zhuker/lamejs), unmodified, licensed under the GNU LGPL v3 (see COPYING.LESSER and COPYING).\nSource: https://github.com/zhuker/lamejs/tree/v1.2.1 and https://www.npmjs.com/package/lamejs/v/1.2.1\nUsed only by the Watch Room converter for MP3 encoding; you may replace this file with any compatible lamejs build.\n' > vendor/lamejs/README.txt
           rm -rf package lamejs-1.2.1.tgz
           ls -la vendor/lamejs
           node -e "const code=require('fs').readFileSync('vendor/lamejs/lame.min.js','utf8'); const lib=new Function(code+';return typeof lamejs!==\"undefined\"?lamejs:globalThis.lamejs;')(); if(!lib||!lib.Mp3Encoder) throw new Error('lamejs did not expose Mp3Encoder'); const e=new lib.Mp3Encoder(2,44100,128); const s=new Int16Array(1152*10); const out=e.encodeBuffer(s,s); console.log('lamejs OK, frame bytes', out.length + e.flush().length);"

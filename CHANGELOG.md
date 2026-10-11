@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.6.1 — 2026-10-11
+
+- The bundled MP3 encoder (lamejs) now ships with the full GNU LGPL v3 and GPL v3 licence texts and a source link, as its licence requires.
+
 ## 1.6.0 — 2026-10-11
 
 ### Vocal splitter (replaces the simple instrumental filter)
