@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.7.0 — 2026-10-11
+
+### AI vocal separation
+- New **AI vocal separation** panel in Music & Triggers. **Download model** fetches UVR's MDX-Net *Inst HQ 3* model (64 MB) once from a Hugging Face mirror. It is checked against its SHA-256 and stored in that GM's browser (IndexedDB). **Load model file…** works offline.
+- Import & convert has a **Separation** choice: *AI model* (best quality) or *Spectral* (fast). AI runs in the GM's browser with ONNX Runtime Web. It uses the graphics card where WebGPU is available, otherwise up to 3 processor cores in parallel. Expect roughly 3–5× the song's length on the processor. An optional extra AI pass doubles the time for a barely audible gain, so it's off by default.
+- Measured on 5 real songs (MUSDB18 test set, SDR): AI instrumental 14.9 dB / vocals 10.9 dB, against 5.5 / 1.2 dB for the spectral splitter and 4.3 / −4.3 dB for doing nothing.
+
+### Pre-rendered stems, used automatically
+- ✂ on a library track (or **Pre-render tracks with vocal settings**) saves instrumental and vocals versions linked to it. Uses AI when installed, otherwise spectral.
+- Whenever a track with pre-rendered stems is set to *Remove vocals* or *Vocals only*, the room plays the stem file for everyone instead of filtering live. This covers the Track sound panel, library play, triggers, boss phases and cinematics. Switching versions crossfades and keeps the playback position.
+- Re-rendering replaces the old stems in the library. The library shows which tracks are pre-rendered and with which engine.
+
+### Changed
+- The live splitter's note now says plainly that it's a rough effect on real songs, and points to pre-rendering.
+
 ## 1.6.1 — 2026-10-11
 
 - The bundled MP3 encoder (lamejs) now ships with the full GNU LGPL v3 and GPL v3 licence texts and a source link, as its licence requires.

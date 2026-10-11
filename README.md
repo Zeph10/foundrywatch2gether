@@ -84,9 +84,22 @@ Only the GM or permitted live playback controllers can invoke a configured manua
 
 **Saved, in the library.** *Music & Triggers → Import & convert* takes a direct file link, a file from your computer, or an existing library track. It saves any of: the full track as MP3, an instrumental, and a vocals-only version. The files go into the module's storage folder (kept across updates) and appear in the library, linked as stems. YouTube/Vimeo/Twitch/Spotify links can't be imported; their terms don't allow downloading. If a site blocks downloads from other websites, download the file and choose *From your computer*.
 
-**What to expect.** This is the classic "centre extraction" approach, done carefully. It works well on typical studio mixes with a centred lead vocal. It can't separate the voice from other instruments that sit in the centre at the same pitch (snare, lead guitar, piano solo). Strong reverb on the voice and double-tracked or wide harmonies partly survive. Mono recordings can't be split at all. For the cleanest results, separate the song with an AI stem tool first (see below), then import the instrumental with *From your computer*.
+**AI separation (v1.7, best quality).** *Music & Triggers → AI vocal separation → Download model* fetches a trained MDX-Net model (UVR's *Inst HQ 3*, 64 MB) from Hugging Face once. It's checked against its SHA-256 and kept in that GM's browser, not on the Foundry server. Import & convert then offers **Separation: AI model**, and it runs entirely in the GM's browser.
 
-**Best quality: AI stem separation.** Free desktop tools such as **Ultimate Vocal Remover** (UVR5, using MDX-Net or Demucs models) or **Demucs** separate vocals far better than any filter, because they're trained on real music. They produce separate vocal, drums, bass and other tracks. Run one on your computer, then import the result.
+- **Speed:** on the processor it takes roughly 3–5× the song's length, so about 10–20 minutes for a 4-minute song. It uses up to 3 cores in parallel. Browsers with WebGPU use the graphics card and are much faster. Leave the tab open while it works.
+- **Offline:** if the download is blocked, download `UVR-MDX-NET-Inst_HQ_3.onnx` yourself and use **Load model file…**.
+
+**Pre-render, and the room uses it automatically.** The ✂ button on a library track (or **Pre-render tracks with vocal settings**) saves an instrumental and a vocals version next to it. It uses AI when the model is installed, otherwise the spectral splitter. From then on, whenever that track is set to *Remove vocals* or *Vocals only*, the room plays the pre-rendered file for everyone instead of filtering live. That includes the Track sound panel, triggers, boss phases and cinematics. Switching between versions crossfades and keeps the position.
+
+**How good is it?** Measured on 5 real songs from the MUSDB18 test set (SDR, higher is better; +3 dB ≈ half the leftover error):
+
+| Method | Instrumental | Vocals |
+|---|---|---|
+| Doing nothing (the mix itself) | 4.3 dB | −4.3 dB |
+| Live / spectral splitter | 5.5 dB | 1.2 dB |
+| **AI model** | **14.9 dB** | **10.9 dB** |
+
+The live splitter is a rough karaoke effect on real songs. It can't separate the voice from other centred instruments in the same range, and reverb and wide harmonies survive. The AI result is close to what desktop tools such as Ultimate Vocal Remover produce with the same model. Mono recordings can't be split by the live splitter, but the AI model handles them.
 
 ## Track sound: fades
 
@@ -163,6 +176,8 @@ Foundry will then offer updates whenever a new release is published.
 ## Third-party code
 
 - **lamejs 1.2.1** (MP3 encoder, https://github.com/zhuker/lamejs), LGPL-3.0, bundled unmodified in release builds at `vendor/lamejs/` with its licence. It runs only when you use Import & convert.
+- **ONNX Runtime Web 1.20.1** (Microsoft, MIT), loaded from jsDelivr only when AI separation runs. You can point it elsewhere in Module Settings → *AI separation: runtime location*.
+- **UVR-MDX-NET-Inst_HQ_3** model by the Ultimate Vocal Remover project (https://github.com/Anjok07/ultimatevocalremovergui). It isn't bundled; each GM's browser downloads it from a public Hugging Face mirror when asked.
 
 ## Developer notes
 

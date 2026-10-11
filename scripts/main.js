@@ -1191,7 +1191,7 @@ class WatchRoom {
         : "Only for audio/video files (uploads or direct links). YouTube, Vimeo and Twitch don't give access to their audio.")
       : stem ? `Playing the pre-rendered ${stem.kind} version${entry.stems && this.music.library.find(t => t.url === stem.url)?.stemEngine === "ai" ? " (AI-separated)" : ""}.`
       : mode === "off" ? `Splits the voice from the music, live for everyone.${entry.stems ? " Pre-rendered versions are ready for this track." : " For the best quality, pre-render this track in Music & Triggers."}`
-      : "Live: removes what's mixed dead-centre in the vocal range. Higher strength removes more but can sound watery. Pre-render the track (Music & Triggers) for AI-quality separation.";
+      : "Live and quick, but rough on real songs: it removes what's mixed dead-centre, which includes other centre instruments. Pre-render the track with AI (Music & Triggers → ✂) for clean separation.";
     q(panel, '[data-act="find-instrumental"]').hidden = supported || !["youtube", "vimeo", "twitch"].includes(entry.provider);
     for (const input of panel.querySelectorAll("[data-fx-fade]")) {
       if (document.activeElement !== input) input.value = String(Number(entry[input.dataset.fxFade]) || 0);

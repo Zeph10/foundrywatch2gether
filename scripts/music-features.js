@@ -228,7 +228,7 @@ export class MusicFeatures {
               <label class="fwr-convert-row">Separation <select name="engine">
                 <option value="ai" ${this.ai.status?.installed ? 'selected' : 'disabled'}>AI model (best quality, slower)${this.ai.status?.installed ? '' : ' — download it below'}</option>
                 <option value="spectral" ${this.ai.status?.installed ? '' : 'selected'}>Spectral (instant, lower quality)</option></select></label>
-              <label title="Runs the AI model twice per piece (on the sound and on its inverse) and averages: cleaner, twice as slow."><input type="checkbox" name="denoise" checked> Extra-clean AI pass (2× slower)</label>
+              <label title="Runs the AI model twice per piece (on the sound and on its inverse) and averages. In tests on real songs it improved quality only marginally."><input type="checkbox" name="denoise"> Extra AI pass (2× slower, barely audible gain)</label>
               <label><input type="checkbox" name="original" checked> Full track (MP3)</label>
               <label><input type="checkbox" name="instrumental" checked> Instrumental (vocals removed)</label>
               <label><input type="checkbox" name="vocals"> Vocals only</label>
@@ -340,7 +340,7 @@ export class MusicFeatures {
     const state = !st ? 'Checking this browser…' : st.installed ? `Installed in this browser (${mb(st.bytes)}).` : st.error ? `Unavailable: ${esc(st.error)}` : 'Not installed in this browser.';
     return `<h3>AI vocal separation <small>${st?.installed ? 'ready' : 'optional'}</small></h3>
       <div class="fwr-ai" data-ai-panel>
-        <p class="fwr-manager-note">Uses <strong>${esc(m.name)}</strong>, a neural network from the Ultimate Vocal Remover project, to separate vocals far more cleanly than the live splitter. It runs only on this GM's computer, when you pre-render or convert a track; the result is saved as ordinary audio files everyone can play. It will run on your <strong>${esc(this.ai.backendLabel)}</strong>. Rough time for a 4-minute song: ${this.ai.backend === 'webgpu' ? '1–3 minutes' : '5–15 minutes'}. The ${mb(m.bytes)} model is downloaded once from Hugging Face and kept in this browser.</p>
+        <p class="fwr-manager-note">Uses <strong>${esc(m.name)}</strong>, a neural network from the Ultimate Vocal Remover project. On real songs it separates vocals about 10 dB more cleanly than the live splitter. It runs only on this GM's computer, when you pre-render or convert a track; the results are saved as ordinary audio files everyone can play. It will run on your <strong>${esc(this.ai.backendLabel)}</strong>${this.ai.backend === 'webgpu' ? '' : `, roughly 3–5× the song's length (about 10–20 minutes for a 4-minute song; Foundry keeps working meanwhile, but keep this tab open)`}. The ${mb(m.bytes)} model is downloaded once from Hugging Face and kept in this browser.</p>
         <div class="fwr-ai-row"><span data-ai-state>${state}</span></div>
         <div class="fwr-ai-row">
           <button type="button" data-mgr="ai-install" ${st?.installed ? 'hidden' : ''}>Download model (${mb(m.bytes)})</button>
@@ -374,7 +374,7 @@ export class MusicFeatures {
     const track = this.library.find(t => t.id === trackId);
     if (!track || !this.canPrerender(track)) return null;
     const engine = this.ai.status?.installed ? 'ai' : 'spectral';
-    return this.runConversion({ source: { libraryId: track.id }, title: track.title, category: track.category, engine, denoise: true,
+    return this.runConversion({ source: { libraryId: track.id }, title: track.title, category: track.category, engine, denoise: false,
       strength: track.vocalStrength ?? 0.7, kbps: 192, outputs: { original: false, instrumental: true, vocals: true } }, { label: `${prefix ? `${prefix} · ` : ''}Pre-rendering “${track.title}”`, quiet });
   }
 
