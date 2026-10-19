@@ -169,7 +169,9 @@ Foundry will then offer updates whenever a new release is published.
 - **Independent playback:** Stops automatic syncing locally and enables local playback controls. Turning it off catches up to the room.
 - **Repeat:** The repeat button cycles off → current track (badge “1”) → whole queue; the adjacent button loops just the current track. Both are controller-only.
 - **Volume:** Per-client, not broadcast. Click the speaker icon to mute/unmute.
-- **Hide X / Escape:** Hides the local window; **does not close the shared room**. Re-open it with the launcher (which toggles) or the scene-control button. The floating launcher can be turned off in Module Settings.
+- **Minimize (– button, Escape, or the launcher):** shrinks the room to a small bar at the bottom-left and **keeps playing and in sync**, including while Foundry is in a background tab or another window has focus. The bar shows the track and time, with play/pause (for controllers), mute, open and close. Drag it anywhere by its grip; click the title to open the full player again. The choice is remembered, so the room opens minimized next time too.
+- **Media keys:** the keyboard play/pause key and the system's "now playing" controls work while Foundry isn't focused. Controllers pause or skip for everyone. For other players, play/pause mutes or unmutes just them. Coverage depends on the browser, and YouTube embeds may take over these keys.
+- **Close (X):** closes the player for you and **stops your sound**; it does not end the shared room. Re-open it with the launcher or the scene-control button. The floating launcher can be turned off in Module Settings.
 - **End room:** Host or GM closes the shared room for everybody (asks for confirmation).
 - **Start room:** Permission threshold is configured in Foundry Module Settings.
 
@@ -182,7 +184,7 @@ Foundry will then offer updates whenever a new release is published.
 ## Developer notes
 
 - Entrypoint: `scripts/main.js` (ES module). Pure source and state operations in `scripts/state.js`. Third-party adapters in `scripts/providers.js`, trigger / music manager logic in `scripts/music-features.js`, encounter profiles and cinematics in `scripts/director.js` (pure rules in `director-core.js`), shared overlay helpers in `scripts/ui.js`.
-- API available after ready: `game.modules.get('foundry-watch-room').api` → `open()`, `closeLocally()`, `toggle()`, `getState()`, `startRoom()`, `endRoom()`, `addVideo(url, title)`, `addAudio(url, title)`, `openMusicManager(actorUuid?)`, `trigger(nameOrId)` and `triggerEvent(event, context?)`.
+- API available after ready: `game.modules.get('foundry-watch-room').api` → `open()`, `closeLocally()`, `minimize()`, `restore()`, `toggle()`, `getState()`, `startRoom()`, `endRoom()`, `addVideo(url, title)`, `addAudio(url, title)`, `openMusicManager(actorUuid?)`, `trigger(nameOrId)` and `triggerEvent(event, context?)`.
 - Tests: `node --test tests/*.mjs` (pure state/parsing, repeat/vote/encounter logic and manifest).
 - No permanent storage of provider API keys, account credentials, user chat messages, or playlist history.
 - Manual test checklist: one GM + one player; start with autojoin; try all four sources; grant/revoke; queue Next; seek; reload mid-play; independently pause/rejoin; scene placement/drag and pan/zoom; browser autoplay prompts; GM disconnect; end room; check browser devtools for CSP or provider errors.

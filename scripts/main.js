@@ -8,6 +8,7 @@ import { Presence, LISTENER_STATUS } from "./presence.js";
 import { raise } from "./ui.js";
 import { MusicFeatures } from "./music-features.js";
 import { Director } from "./director.js";
+import { MiniDock } from "./mini-dock.js";
 
 const SOCKET = `module.${MODULE_ID}`;
 const q = (root, sel) => root?.querySelector(sel);
@@ -55,6 +56,7 @@ class WatchRoom {
     this.loadGeneration = 0;
     this.autoOpenedRoomId = null;
     this.hidden = true;
+    this.minimized = false;
     this.independent = false;
     this.mode = "window";
     this.currentVolume = 0.7;
@@ -76,6 +78,7 @@ class WatchRoom {
     this.presence = new Presence(this);
     this.promptedCombats = new Set();
     this.director = new Director(this);
+    this.dock = new MiniDock(this);
   }
 
   get isLeader() {
@@ -113,6 +116,10 @@ class WatchRoom {
       }
     }, 2500);
     this.presence.start();
+    // Background tabs get their timers slowed down, so snap back into sync the moment the tab is visible again.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible" && !this.hidden && this.state.open) this.reconcile(true).catch(console.error);
+    });
     // Initiative: invite everyone who isn't listening yet (once per combat). Waits a moment so encounter
     // music triggered by the same roll can open the room first.
     Hooks.on("updateCombatant", (combatant, changes) => {
@@ -145,11 +152,14 @@ class WatchRoom {
   updateLauncher() {
     if (!this.launcher) return;
     this.launcher.classList.toggle("fwr-live", Boolean(this.state.open));
-    this.launcher.setAttribute("aria-pressed", String(!this.hidden));
+    this.launcher.setAttribute("aria-pressed", String(!this.hidden && !this.minimized));
+    this.launcher.classList.toggle("fwr-minimized", this.minimized);
     this.launcher.setAttribute("aria-label", this.state.open ? "Shared watch room (live)" : "Shared watch room");
   }
+  /** Launcher: open the player; when it's showing, minimize it (sound keeps playing), or close it if no room is open. */
   toggleVisible() {
-    if (this.hidden) this.show();
+    if (this.hidden || this.minimized) this.show();
+    else if (this.state.open) this.minimize();
     else this.hide();
   }
 
@@ -279,7 +289,7 @@ class WatchRoom {
     this.streams.onState(s);
     this.external.sync();
     const focus = Boolean(s.cinematicFocus && !this.independent);
-    if (s.open && focus && this.hidden) this.show();
+    if (s.open && focus && (this.hidden || this.minimized)) this.show();
     this.root?.classList.toggle('fwr-cinematic',focus);
     this.root?.setAttribute('data-director-active',String(Boolean(s.cinematic)));
     if (JSON.stringify(prior.cinematic ?? null) !== JSON.stringify(s.cinematic ?? null)) this.director.render();
@@ -295,7 +305,10 @@ class WatchRoom {
     }
     if (s.roomId !== this.autoOpenedRoomId) {
       this.autoOpenedRoomId = s.roomId;
-      if (game.settings.get(MODULE_ID, "autoJoin")) this.show();
+      if (game.settings.get(MODULE_ID, "autoJoin")) {
+        this.show();
+        if (game.settings.get(MODULE_ID, "minimized") && !focus) this.minimize({ remember: false });
+      }
       else if (!initial && this.hidden) ui.notifications?.info("A shared watch room has started. Open Watch Room to join.");
     }
     if (!this.hidden) {
@@ -338,7 +351,8 @@ class WatchRoom {
           <button type="button" data-act="mode" title="Toggle window / scene view">${icon("fa-layer-group")} <span>Scene</span></button>
           <button type="button" data-act="pip" title="Picture-in-Picture" aria-label="Picture-in-Picture">${icon("fa-up-right-and-down-left-from-center")}</button>
           <button type="button" data-act="fullscreen" title="Fullscreen" aria-label="Fullscreen">${icon("fa-expand")}</button>
-          <button type="button" data-act="hide" title="Hide locally without closing the room" aria-label="Hide watch room">${icon("fa-xmark")}</button>
+          <button type="button" data-act="minimize" title="Minimize: keep listening with a small bar (Esc)" aria-label="Minimize and keep listening">${icon("fa-window-minimize")}</button>
+          <button type="button" data-act="hide" title="Close the player (stops the sound for you; the room stays open)" aria-label="Close the player">${icon("fa-xmark")}</button>
         </div>
       </header>
       <div class="fwr-body">
@@ -491,6 +505,7 @@ class WatchRoom {
 
   show() {
     this.createUI();
+    if (this.minimized) this.leaveMinimized();
     this.hidden = false;
     this.root.hidden = false;
     queueMicrotask(() => this.presence?.update());
@@ -502,6 +517,7 @@ class WatchRoom {
     else this.reconcile(true).catch(console.error);
   }
   hide() {
+    if (this.minimized) this.leaveMinimized();
     this.hidden = true;
     queueMicrotask(() => this.presence?.update());
     if (this.pipWindow) { try { this.pipWindow.close(); } catch { /* already closed */ } }
@@ -511,9 +527,122 @@ class WatchRoom {
     this.observedPlaying = false;
     this.localPlaying = false;
     this.updateLauncher();
+    this.updateMediaSession();
+  }
+
+  /**
+   * Minimize: the full player moves off-screen but keeps playing and syncing (it is never paused or
+   * reloaded), and a small bar stays on screen. `remember` keeps the choice for next time.
+   */
+  async minimize({ remember = true } = {}) {
+    if (!this.root || this.hidden) return;
+    if (!this.state.open) { this.hide(); return; }
+    if (remember) game.settings.set(MODULE_ID, "minimized", true);
+    if (this.minimized) return;
+    const doc = this.root.ownerDocument;
+    if (doc.fullscreenElement) { try { await doc.exitFullscreen(); } catch { /* not fullscreen */ } }
+    this.saveWindowRect();
+    this.minimized = true;
+    if (this.pipWindow) { try { this.pipWindow.close(); } catch { /* already closed */ } }
+    this.root.classList.add("fwr-minimized");
+    this.root.inert = true;
+    this.root.setAttribute("aria-hidden", "true");
+    this.dock.show();
+    this.updateLauncher();
+    queueMicrotask(() => this.presence?.update());
+  }
+
+  /** Bring the full player back from the minimized bar. */
+  restore() {
+    game.settings.set(MODULE_ID, "minimized", false);
+    this.show();
+  }
+
+  leaveMinimized() {
+    this.minimized = false;
+    this.dock.hide();
+    if (!this.root) return;
+    this.root.classList.remove("fwr-minimized");
+    this.root.inert = false;
+    this.root.removeAttribute("aria-hidden");
+    this.applyGeometry = true;
+    this.scenePosition(true);
+    this.updateLauncher();
+  }
+
+  /**
+   * Media keys and the system's "now playing" controls (keyboard play/pause, phone lock screen, Windows/macOS
+   * media overlay), so the room can be controlled without switching back to Foundry. Play/pause and next act
+   * for everyone when this user may control the room; otherwise play/pause mutes or unmutes just this browser.
+   */
+  updateMediaSession() {
+    const session = globalThis.navigator?.mediaSession;
+    if (!session) return;
+    const entry = this.state.open && !this.hidden ? this.state.current : null;
+    try {
+      const key = entry ? `${entry.uid}|${entry.title}` : "";
+      if (key !== this.mediaSessionKey) {
+        this.mediaSessionKey = key;
+        session.metadata = entry && globalThis.MediaMetadata
+          ? new MediaMetadata({ title: entry.title || "Watch Room", artist: "Foundry Watch Room", album: game.world?.title || "" })
+          : null;
+      }
+      session.playbackState = !entry ? "none" : (this.independent ? this.localPlaying : this.state.playing) ? "playing" : "paused";
+      if (this.mediaSessionWired) return;
+      this.mediaSessionWired = true;
+      const playPause = want => {
+        if (this.hidden || !this.state.current) return;
+        if (this.independent || this.canControl) {
+          const playing = this.independent ? this.localPlaying : this.state.playing;
+          if (want === undefined || want !== playing) this.togglePlayback();
+        } else this.toggleMute();
+      };
+      session.setActionHandler("play", () => playPause(true));
+      session.setActionHandler("pause", () => playPause(false));
+      try { session.setActionHandler("stop", () => playPause(false)); } catch { /* unsupported action */ }
+      try { session.setActionHandler("nexttrack", () => { if (!this.hidden && this.canControl) this.requestSongChange("NEXT"); }); } catch { /* unsupported */ }
+    } catch (error) { console.debug("Watch Room | media session unavailable", error); }
+  }
+
+  /** The room position this browser should be at (its own clock in independent mode). */
+  currentPosition() {
+    const duration = Number(this.adapter?.getDuration?.()) || 0;
+    const t = this.independent ? (Number(this.adapter?.getTime?.()) || 0) : expectedPosition(this.state);
+    return duration > 0 ? Math.min(t, duration) : t;
+  }
+
+  async togglePlayback() {
+    if (this.independent) {
+      if (!this.adapter) return;
+      try {
+        if (this.localPlaying) { await this.adapter.pause(); this.localPlaying = false; }
+        else { await this.adapter.play(); this.localPlaying = true; }
+      } catch { this.showUnlock(true); }
+      this.updateUI();
+    } else if (this.canControl) this.issue(this.state.playing ? "PAUSE" : "PLAY");
+  }
+
+  toggleMute() {
+    const restore = this.lastVolume > 0 ? this.lastVolume : 0.7;
+    if (this.currentVolume > 0) this.lastVolume = this.currentVolume;
+    this.setVolume(this.currentVolume > 0 ? 0 : restore, true);
+    const slider = q(this.root, "[data-volume]");
+    if (slider) slider.value = String(this.currentVolume);
+  }
+
+  /** Called from a click: unlocks browser sound and starts the player. */
+  async unlockPlayback() {
+    this.showUnlock(false);
+    audioContext(); resumeAudio();
+    try {
+      await this.adapter?.play();
+      await this.reconcile(true);
+    } catch { this.showUnlock(true); }
   }
 
   updateUI() {
+    this.dock.paint();
+    this.updateMediaSession();
     if (!this.root) return;
     const s = this.state; const el = this.root;
     const open = Boolean(s.open);
@@ -692,6 +821,7 @@ class WatchRoom {
     button.innerHTML = icon(v === 0 ? "fa-volume-xmark" : v < 0.5 ? "fa-volume-low" : "fa-volume-high");
     button.setAttribute("aria-label", v === 0 ? "Unmute" : "Mute");
     button.title = v === 0 ? "Unmute" : "Mute";
+    this.dock?.paint();
   }
 
   setMessage(message, warning = false) {
@@ -743,7 +873,7 @@ class WatchRoom {
 
   onKey(event) {
     if (event.target.closest("input, textarea, select")) return;
-    if (event.key === "Escape" && document.fullscreenElement !== this.root) { event.stopPropagation(); this.hide(); }
+    if (event.key === "Escape" && document.fullscreenElement !== this.root) { event.stopPropagation(); this.minimize(); }
   }
 
   async onClick(event) {
@@ -752,23 +882,14 @@ class WatchRoom {
     const act = button.dataset.act;
     switch (act) {
       case "hide": this.hide(); break;
+      case "minimize": this.minimize(); break;
       case "open-room": this.issue("OPEN"); break;
       case "close-room": {
         const ok = await this.confirm("End watch room?", "This closes the room and clears the queue for everyone.");
         if (ok) this.issue("CLOSE");
         break;
       }
-      case "toggle": {
-        if (this.independent) {
-          if (!this.adapter) return;
-          try {
-            if (this.localPlaying) { await this.adapter.pause(); this.localPlaying = false; }
-            else { await this.adapter.play(); this.localPlaying = true; }
-          } catch { this.showUnlock(true); }
-          this.updateUI();
-        } else this.issue(this.state.playing ? "PAUSE" : "PLAY");
-        break;
-      }
+      case "toggle": await this.togglePlayback(); break;
       case "next": this.requestSongChange('NEXT'); break;
       case "select": this.requestSongChange('SELECT',button.dataset.uid); break;
       case 'compact': this.toggleCompact(); break;
@@ -827,13 +948,7 @@ class WatchRoom {
         this.paintSidebar();
         break;
       }
-      case "mute": {
-        const restore = this.lastVolume > 0 ? this.lastVolume : 0.7;
-        if (this.currentVolume > 0) this.lastVolume = this.currentVolume;
-        this.setVolume(this.currentVolume > 0 ? 0 : restore, true);
-        q(this.root, "[data-volume]").value = String(this.currentVolume);
-        break;
-      }
+      case "mute": this.toggleMute(); break;
       case "fullscreen": {
         const doc = this.root.ownerDocument;
         try { if (!doc.fullscreenElement) await this.root.requestFullscreen(); else await doc.exitFullscreen(); }
@@ -841,15 +956,7 @@ class WatchRoom {
         break;
       }
       case "pip": await this.openPiP(); break;
-      case "unlock": {
-        this.showUnlock(false);
-        audioContext(); resumeAudio();
-        try {
-          await this.adapter?.play();
-          await this.reconcile(true);
-        } catch { this.showUnlock(true); }
-        break;
-      }
+      case "unlock": await this.unlockPlayback(); break;
     }
   }
 
@@ -946,6 +1053,7 @@ class WatchRoom {
     if (b) b.hidden = !show;
     if (show) this.setMessage(AUTOPLAY_MESSAGE, true);
     else if (q(this.root, "[data-message]")?.textContent === AUTOPLAY_MESSAGE) this.setMessage("");
+    this.dock?.paint();
   }
 
   async loadCurrent() {
@@ -1159,7 +1267,7 @@ class WatchRoom {
       close();
       if (choice !== "yes") return;
       audioContext(); resumeAudio();          // inside the click: unlocks Web Audio and media playback
-      this.show();
+      if (this.hidden) this.show();
       this.showUnlock(false);
       if (this.state.current?.external) this.external.open();
       try { await this.adapter?.play?.(); } catch { /* the player may still be loading; reconcile retries */ }
@@ -1301,6 +1409,7 @@ class WatchRoom {
   }
 
   paintProgress() {
+    this.dock.paintProgress();
     if (!this.root || !this.state.open) return;
     this.paintVote();
     const entry = this.state.current;
@@ -1379,7 +1488,7 @@ class WatchRoom {
     };
   }
   saveWindowRect() {
-    if (!this.root || this.hidden || this.pipWindow || this.layout !== "window" || this.root.ownerDocument.fullscreenElement ||
+    if (!this.root || this.hidden || this.minimized || this.pipWindow || this.layout !== "window" || this.root.ownerDocument.fullscreenElement ||
       this.root.classList.contains("fwr-cinematic")) return;
     const r = this.root.getBoundingClientRect();
     if (!r.width || !r.height) return;
@@ -1400,7 +1509,7 @@ class WatchRoom {
   }
 
   scenePosition(forceGeometry = false) {
-    if (!this.root || this.hidden || this.pipWindow) return;
+    if (!this.root || this.hidden || this.minimized || this.pipWindow) return;
     const root = this.root;
     const scene = this.pendingScene || this.state.scene;
     const onScene = this.state.open && !this.compact && this.mode === "scene" && scene?.sceneId === canvas?.scene?.id && canvas?.stage && canvas?.app;
@@ -1451,7 +1560,7 @@ class WatchRoom {
 
   /** Raise the floating window above other Foundry windows, cooperating with Foundry's own z-order counter. */
   bringToFront() {
-    if (!this.root || this.layout !== "window" || this.pipWindow) return;
+    if (!this.root || this.layout !== "window" || this.pipWindow || this.minimized) return;
     raise(this.root);
   }
 
@@ -1603,6 +1712,12 @@ Hooks.once("init", () => {
   game.settings.register(MODULE_ID, 'compact', {
     name:'Compact player',scope:'client',config:false,type:Boolean,default:false
   });
+  game.settings.register(MODULE_ID, "minimized", {
+    name: "Watch Room minimized", scope: "client", config: false, type: Boolean, default: false
+  });
+  game.settings.register(MODULE_ID, "miniPosition", {
+    name: "Minimized bar position", scope: "client", config: false, type: Object, default: {}
+  });
   game.settings.register(MODULE_ID, 'compactRect', {
     name:'Compact player geometry',scope:'client',config:false,type:Object,
     default:{left:28,top:140,width:336,height:270}
@@ -1644,6 +1759,8 @@ Hooks.once("ready", () => {
   game.modules.get(MODULE_ID).api = {
     open: () => watch.show(),
     closeLocally: () => watch.hide(),
+    minimize: () => watch.minimize(),
+    restore: () => watch.restore(),
     toggle: () => watch.toggleVisible(),
     getState: () => structuredClone(watch.state),
     startRoom: () => watch.issue("OPEN"),

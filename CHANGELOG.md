@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.8.0 — 2026-10-19
+
+### Minimize and keep listening
+- New **minimize** button (–) in the room's header. The full player moves out of view but keeps playing and following the room. It is never paused or reloaded. A small bar stays at the bottom-left with the track, a live progress line, play/pause (for controllers), mute, **open** and **close**. Drag the bar by its grip to move it; its position is remembered.
+- **Escape** and the **launcher** now minimize instead of closing, so they no longer cut your sound. **X** still closes the player and stops your sound, and its tooltip now says so.
+- The minimized choice is remembered per browser. When a room starts or Foundry reloads, the room opens minimized for anyone who left it that way. Cinematics with focus still open the full player.
+- **Media keys / system media controls**: play/pause and next-track work from the keyboard or the OS "now playing" panel while Foundry is in the background. Controllers act for everyone. For other players, play/pause mutes or unmutes just them.
+- **Background tabs**: the room re-syncs the moment you switch back to the Foundry tab, catching up after the browser has slowed background timers.
+- "Who's listening" shows minimized players as listening. Minimized players who need a click for sound get a **Click for sound** button on the bar.
+- API: `minimize()` and `restore()`.
+
 ## 1.7.0 — 2026-10-11
 
 ### AI vocal separation

@@ -2,7 +2,7 @@
   "id": "foundry-watch-room",
   "title": "Shared Watch Room",
   "description": "Shared synchronized multimedia room with a reusable audio/video library, HP boss phases, dynamic encounter profiles, prioritized music triggers, and GM cinematic timelines.",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "authors": [
     {
       "name": "Community module prototype"
@@ -22,7 +22,7 @@
   "persistentStorage": true,
   "url": "https://github.com/Zeph10/foundrywatch2gether",
   "manifest": "https://github.com/Zeph10/foundrywatch2gether/releases/latest/download/module.json",
-  "download": "https://github.com/Zeph10/foundrywatch2gether/releases/download/v1.7.0/module.zip",
+  "download": "https://github.com/Zeph10/foundrywatch2gether/releases/download/v1.8.0/module.zip",
   "bugs": "https://github.com/Zeph10/foundrywatch2gether/issues",
   "readme": "https://github.com/Zeph10/foundrywatch2gether/blob/main/README.md",
   "changelog": "https://github.com/Zeph10/foundrywatch2gether/blob/main/CHANGELOG.md"
